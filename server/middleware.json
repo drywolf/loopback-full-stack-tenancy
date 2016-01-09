@@ -3,9 +3,9 @@
     "loopback#favicon": {}
   },
   "initial": {
-	"loopback#context": {
+    "loopback#context": {
       "params": {
-        "enableHttpContext" : true
+        "enableHttpContext": true
       }
     },
     "compression": {},
@@ -20,7 +20,7 @@
   "session": {},
   "auth": {
     "loopback#token": {},
-	"./middleware/req-intercept": {}
+    "./middleware/req-intercept": {}
   },
   "parse": {},
   "routes": {},

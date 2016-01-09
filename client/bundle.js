@@ -98731,26 +98731,23 @@ module.exports = function(model, debug)
 	  if (debug)
         console.log("getDS: no datasource");
 	
-      throw new Error("should not happen")
-	  
-      model.attachTo(model.app.dataSources.nullsrc);
-      return this.dataSource;
+		ds_name = 'nullsrc';
     }
-
+	
 	var ds = model.app.dataSources[ds_name];
 	
     // if the data-source is invalid, throw an error
     if (!ds)
       throw new Error("DataSource: " + ds_name + " not available");
 
-	if (model.dataSource.settings.name === ds.settings.name)
+  	if (model.dataSource.settings.name === ds.settings.name)
 	{
 	  if (debug)
 		console.log("getDS: correct datasource active -> " + ds_name);
 	
 	  return this.dataSource;
 	}
-
+  
 	model.attachTo(ds);
 
 	if (debug)
@@ -105864,7 +105861,14 @@ module.exports={
             "foreignKey": ""
           }
         },
-        "acls": [],
+        "acls": [
+          {
+            "accessType": "*",
+            "principalType": "ROLE",
+            "principalId": "$unauthenticated",
+            "permission": "DENY"
+          }
+        ],
         "methods": {}
       },
       "sourceFile": "loopback-boot#models#common\\models\\person.js"
@@ -105894,7 +105898,14 @@ module.exports={
         },
         "validations": [],
         "relations": {},
-        "acls": [],
+        "acls": [
+          {
+            "accessType": "*",
+            "principalType": "ROLE",
+            "principalId": "$unauthenticated",
+            "permission": "DENY"
+          }
+        ],
         "methods": {}
       },
       "sourceFile": "loopback-boot#models#common\\models\\pet.js"
@@ -106649,43 +106660,5 @@ module.exports = function(model)
 };
 
 },{"./utils/datasource-mixin":400}],"loopback-boot#models#common\\models\\pet.js":[function(require,module,exports){
-var ds_mixin = require('./utils/datasource-mixin');
-
-module.exports = function(model)
-{
-  ds_mixin(model);
-  
-  /*model.getDataSource = function() {
-
-    var ctx = loopback.getCurrentContext();
-
-    if (!ctx)
-    {
-      console.log("getDS: no context");
-      return this.dataSource;
-    }
-
-    var ds_name = ctx.get('datasource');
-
-    if (!ds_name)
-    {
-      console.log("getDS: no datasource");
-      throw new Error("should not happen")
-      model.attachTo(model.app.dataSources.nullsrc);
-      return this.dataSource;
-    }
-
-	var ds = model.app.dataSources[ds_name];
-	
-    // if the data-source is invalid, throw an error
-    if (!ds)
-      throw new Error("DataSource: " + ds_name + " not available");
-
-    model.attachTo(ds);
-
-    console.log("getDS: specific datasource -> " + ds_name);
-    return ds;
-  }*/
-};
-
-},{"./utils/datasource-mixin":400}]},{},[]);
+arguments[4]["loopback-boot#models#common\\models\\person.js"][0].apply(exports,arguments)
+},{"./utils/datasource-mixin":400,"dup":"loopback-boot#models#common\\models\\person.js"}]},{},[]);

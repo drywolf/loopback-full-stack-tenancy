@@ -21,26 +21,23 @@ module.exports = function(model, debug)
 	  if (debug)
         console.log("getDS: no datasource");
 	
-      throw new Error("should not happen")
-	  
-      model.attachTo(model.app.dataSources.nullsrc);
-      return this.dataSource;
+		ds_name = 'nullsrc';
     }
-
+	
 	var ds = model.app.dataSources[ds_name];
 	
     // if the data-source is invalid, throw an error
     if (!ds)
       throw new Error("DataSource: " + ds_name + " not available");
 
-	if (model.dataSource.settings.name === ds.settings.name)
+  	if (model.dataSource.settings.name === ds.settings.name)
 	{
 	  if (debug)
 		console.log("getDS: correct datasource active -> " + ds_name);
 	
 	  return this.dataSource;
 	}
-
+  
 	model.attachTo(ds);
 
 	if (debug)

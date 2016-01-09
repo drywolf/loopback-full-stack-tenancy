@@ -10,7 +10,31 @@
 
 	var app = require('loopback-app');
 	
+	var remoteDs = app.dataSources.remoteDS;
+	var remotes = remoteDs.connector.remotes;
+	
+	var User = app.models.User;
 	var Person = app.models.Person;
+	
+	var credentials = 
+	{
+		email: 'test@test.com',
+		password: 'test'
+	};
+	
+	User.login(credentials, function (err, token)
+	{
+		credentials.token = token;
+		console.log("logged in: ", credentials);
+		
+		remotes.auth = 
+		{
+			bearer: btoa(token ? token.id : 'null'),
+			sendImmediately: true
+		};
+		
+		console.log('Set access token for all future requests. (%s)', remotes.auth.bearer);
+    });
 	
 	var query = function()
 	{
@@ -28,6 +52,9 @@
 			console.log("error-sync: ", e);
 		  }
 		  
+		  if (!items || items.length == 0)
+			return;
+			
 		  items[0].pets(function(err, pets)
 		  {
 			console.log("relation-async: ", pets);
