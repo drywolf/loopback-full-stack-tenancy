@@ -1,0 +1,8 @@
+{
+
+  "remoteDS": {
+    "url": "http://localhost:3000/api",
+    "name": "remoteDS",
+    "connector": "remote"
+  }
+}

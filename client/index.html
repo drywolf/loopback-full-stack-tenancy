@@ -1,0 +1,48 @@
+<script src="bundle.js"></script>
+<script>
+	var sources =
+	[
+		'family1',
+		'family2',
+		'family3'
+	];
+	var i = 0;
+
+	var app = require('loopback-app');
+	
+	var Person = app.models.Person;
+	
+	var query = function()
+	{
+		i = ++i % sources.length;
+		window.datasource = sources[i];
+		
+		Person.find({include: 'pets'}, function(err, items) {
+		  console.log("2 -> ", items); // => [] of items in the server’s memory db
+		  try
+		  {
+			  console.log("relation-sync: ", items[0].pets());
+		  }
+		  catch(e)
+		  {
+			console.log("error-sync: ", e);
+		  }
+		  
+		  items[0].pets(function(err, pets)
+		  {
+			console.log("relation-async: ", pets);
+			
+			document.body.innerHTML = 
+				'DataSource: ' + window.datasource + '<br>' + 
+				'Person: ' + JSON.stringify(items[0]) + '<br>' +
+				'Person\'s Pet: ' + JSON.stringify(pets[0]) + '<br>' + 
+				'Time: ' + new Date();
+			
+			if (err)
+				console.log("error-async: ", err);
+		  });
+		});
+	}
+	
+	setInterval(query, 500);
+</script>

@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "sources": [
+      "loopback/common/models",
+      "loopback/server/models",
+      "../common/models",
+      "./models"
+    ],
+    "mixins": [
+      "loopback/common/mixins",
+      "loopback/server/mixins",
+      "../common/mixins",
+      "./mixins"
+    ]
+  },
+  "User": {
+    "dataSource": "remoteDS"
+  },
+  "AccessToken": {
+    "dataSource": "remoteDS",
+    "public": false
+  },
+  "ACL": {
+    "dataSource": "remoteDS",
+    "public": false
+  },
+  "RoleMapping": {
+    "dataSource": "remoteDS",
+    "public": false
+  },
+  "Role": {
+    "dataSource": "remoteDS",
+    "public": false
+  },
+  "Person": {
+    "dataSource": "remoteDS",
+    "public": true
+  },
+  "Pet": {
+    "dataSource": "remoteDS",
+    "public": true
+  }
+}

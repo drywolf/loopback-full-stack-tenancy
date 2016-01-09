@@ -1,0 +1,22 @@
+{
+  "shared": {
+    "name": "shared",
+    "connector": "memory"
+  },
+  "nullsrc": {
+    "name": "nullsrc",
+    "connector": "memory"
+  },
+  "family1": {
+    "name": "family1",
+    "connector": "memory"
+  },
+  "family2": {
+    "name": "family2",
+    "connector": "memory"
+  },
+  "family3": {
+    "name": "family3",
+    "connector": "memory"
+  }
+}

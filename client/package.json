@@ -1,0 +1,30 @@
+{
+  "name": "remote-connector-client",
+  "version": "1.0.0",
+  "main": "server/server.js",
+  "scripts": {
+    "pretest": "jshint ."
+  },
+  "dependencies": {
+    "compression": "^1.0.3",
+    "cors": "^2.5.2",
+    "loopback": "^2.22.0",
+    "loopback-boot": "^2.6.5",
+    "loopback-connector-remote": "strongloop/loopback-connector-remote#7ac17dd652f226c2ad4b3f5f90f5334359d25561",
+    "loopback-datasource-juggler": "^2.39.0",
+    "serve-favicon": "^2.0.1"
+  },
+  "optionalDependencies": {
+    "loopback-explorer": "^1.1.0"
+  },
+  "devDependencies": {
+    "browserify": "^12.0.1",
+    "gulp": "^3.9.0",
+    "jshint": "^2.5.6"
+  },
+  "repository": {
+    "type": "",
+    "url": ""
+  },
+  "description": "remote-connector-client"
+}
