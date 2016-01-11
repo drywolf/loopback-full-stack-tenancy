@@ -33783,6 +33783,7 @@ module.exports = RelationMixin;
  * @class RelationMixin
  */
 function RelationMixin() {
+	console.log("RELATIONS");
 }
 
 /**
@@ -33977,6 +33978,11 @@ function defineRelationProperty(modelClass, def) {
     get: function() {
       var that = this;
       var scope = function() {
+		  var cached = that.__cachedRelations[def.name];
+		  
+		  if (arguments.length == 0)
+			  return cached;
+		  
         return that['__get__' + def.name].apply(that, arguments);
       };
       scope.count = function() {
@@ -34064,7 +34070,7 @@ RemoteConnector.prototype.define = function(definition) {
       'cannot attach ' +
       Model.modelName +
       ' to a remote connector without a Model.sharedClass');
-
+console.log("mixing the mixes")
   jutil.mixin(Model, RelationMixin);
   jutil.mixin(Model, InclusionMixin);
   remotes.addClass(Model.sharedClass);
@@ -43353,6 +43359,7 @@ module.exports = Inclusion;
  */
 
 function Inclusion() {
+	console.log("INCLUDE");
 }
 
 /**
@@ -43393,6 +43400,8 @@ Inclusion.include = function (objects, include, options, cb) {
   }
   var self = this;
 
+  console.log("INCLUDE", include);
+  
   if (!include || (Array.isArray(include) && include.length === 0) ||
       (Array.isArray(objects) && objects.length === 0) ||
       (isPlainObject(include) && Object.keys(include).length === 0)) {
@@ -98709,67 +98718,121 @@ function extend(target) {
 }
 },{}],400:[function(require,module,exports){
 var loopback = require('loopback');
+var DataSource = require('loopback-datasource-juggler').DataSource;
 
-module.exports = function(model, debug)
+var sql_config_template = require('../../../server/sql-server-config.js').sql_template_source;
+
+module.exports = function(model, ds_name)
 {
-  model.getDataSource = function()
-  {
-    var ctx = loopback.getCurrentContext();
+	var config = JSON.parse(JSON.stringify(sql_config_template));
+	config.name = ds_name;
+    config.schema = ds_name;
+    config.connector = require('loopback-connector-mssql');
 
-    if (!ctx)
-    {
-	  if (debug)
-        console.log("getDS: no context");
-	
-      return this.dataSource;
-    }
-
-    var ds_name = ctx.get('datasource');
-
-    if (!ds_name)
-    {
-	  if (debug)
-        console.log("getDS: no datasource");
-	
-		ds_name = 'nullsrc';
-    }
-	
-	var ds = model.app.dataSources[ds_name];
-	
-    // if the data-source is invalid, throw an error
-    if (!ds)
-      throw new Error("DataSource: " + ds_name + " not available");
-
-  	if (model.dataSource.settings.name === ds.settings.name)
+    var ds = new DataSource(config);
+		
+	ds.connector.execute('create schema ' + ds_name, [], function (err, res)
 	{
-	  if (debug)
-		console.log("getDS: correct datasource active -> " + ds_name);
+		console.log("create schema");
+		
+		model.app.models.Person.attachTo(ds);
+		model.app.models.Pet.attachTo(ds);
+		
+		ds.autoupdate(['Person', 'Pet'], function ()
+		{
+		  console.log("Provisioned models to datasource " + ds_name);
+		});
+	});
 	
-	  return this.dataSource;
-	}
-  
-	model.attachTo(ds);
-
-	if (debug)
-		console.log("getDS: switched datasource -> " + ds_name);
+	model.app.dataSources[ds_name] = ds;
 	
-    return ds;
-  }
+	return ds;
 }
 
-},{"loopback":539}],401:[function(require,module,exports){
+},{"../../../server/sql-server-config.js":682,"loopback":572,"loopback-connector-mssql":479,"loopback-datasource-juggler":520}],401:[function(require,module,exports){
+var loopback = require('loopback');
+
+module.exports = function(model, debug, dynamic_ds_mixin)
+{
+    // this is a security measure to ensure that confidential data-sources will not by any means 
+    // stay attached to a model and return their data to an unauthorized request for that data-source
+	model.beforeRemote('**', function(remotingCtx, unused, next)
+	{
+		model.attachTo(model.app.dataSources.nullsrc);
+		next();
+	});
+	
+    // override this method and return model data from the requested data-source
+	model.getDataSource = function()
+    {
+        var ctx = loopback.getCurrentContext();
+
+        if (!ctx)
+        {
+            if (debug)
+                console.log(model.modelName, "getDS: no context");
+            
+            return this.dataSource;
+        }
+        
+        var ds_name = ctx.get('datasource');
+        var user_id = ctx.get('user');
+
+        if (!ds_name)
+        {
+            if (debug)
+                console.log(model.modelName, "getDS: no datasource");
+        
+            return null;
+        }
+                
+        var ds = model.app.dataSources[ds_name];
+        
+        // if the data-source is invalid
+        if (!ds)
+        {
+            // see if we can inject a dynamically created data-source
+            if (dynamic_ds_mixin)
+                ds = dynamic_ds_mixin(model, ds_name);
+            
+            // otherwise just return an error
+            if (!ds)
+                throw new Error("DataSource: " + ds_name + " not available");
+        }
+
+        // NOTE: this is to work arround a bug in the MS SQL connector which does not pass the request context when querying model relations
+        model.app.models.Pet.attachTo(ds);
+        
+        if (model.dataSource.settings.name === ds.settings.name)
+        {
+            if (debug)
+                console.log(model.modelName, "getDS: correct datasource is active -> " + ds_name);
+        
+            return this.dataSource;
+        }
+    
+        model.attachTo(ds);
+
+        if (debug)
+            console.log(model.modelName, "getDS: switched datasource -> " + ds_name);
+        
+        return ds;
+    }
+}
+
+},{"loopback":572}],402:[function(require,module,exports){
 arguments[4][15][0].apply(exports,arguments)
-},{"dup":15}],402:[function(require,module,exports){
+},{"dup":15}],403:[function(require,module,exports){
 arguments[4][16][0].apply(exports,arguments)
-},{"./errors":401,"./reader":403,"./types":404,"./writer":405,"dup":16}],403:[function(require,module,exports){
+},{"./errors":402,"./reader":404,"./types":405,"./writer":406,"dup":16}],404:[function(require,module,exports){
 arguments[4][17][0].apply(exports,arguments)
-},{"./errors":401,"./types":404,"assert":22,"buffer":58,"dup":17}],404:[function(require,module,exports){
+},{"./errors":402,"./types":405,"assert":22,"buffer":58,"dup":17}],405:[function(require,module,exports){
 arguments[4][18][0].apply(exports,arguments)
-},{"dup":18}],405:[function(require,module,exports){
+},{"dup":18}],406:[function(require,module,exports){
 arguments[4][19][0].apply(exports,arguments)
-},{"./errors":401,"./types":404,"assert":22,"buffer":58,"dup":19}],406:[function(require,module,exports){
+},{"./errors":402,"./types":405,"assert":22,"buffer":58,"dup":19}],407:[function(require,module,exports){
 arguments[4][20][0].apply(exports,arguments)
-},{"./ber/index":402,"dup":20}],407:[function(require,module,exports){
+},{"./ber/index":403,"dup":20}],408:[function(require,module,exports){
 (function (Buffer,process){
 // Copyright (c) 2012, Mark Cavage. All rights reserved.
 
@@ -99018,19 +99081,19 @@ Object.keys(assert).forEach(function (k) {
 });
 
 }).call(this,{"isBuffer":require("../../client/node_modules/is-buffer/index.js")},require('_process'))
-},{"../../client/node_modules/is-buffer/index.js":155,"_process":279,"assert":22,"stream":349,"util":396}],408:[function(require,module,exports){
+},{"../../client/node_modules/is-buffer/index.js":155,"_process":279,"assert":22,"stream":349,"util":396}],409:[function(require,module,exports){
 arguments[4][23][0].apply(exports,arguments)
-},{"_process":279,"dup":23}],409:[function(require,module,exports){
+},{"_process":279,"dup":23}],410:[function(require,module,exports){
 arguments[4][24][0].apply(exports,arguments)
-},{"crypto":72,"dup":24,"url":392}],410:[function(require,module,exports){
+},{"crypto":72,"dup":24,"url":392}],411:[function(require,module,exports){
 arguments[4][25][0].apply(exports,arguments)
-},{"_process":279,"crypto":72,"dup":25}],411:[function(require,module,exports){
+},{"_process":279,"crypto":72,"dup":25}],412:[function(require,module,exports){
 arguments[4][26][0].apply(exports,arguments)
-},{"buffer":58,"dup":26,"readable-stream/duplex":571,"util":396}],412:[function(require,module,exports){
+},{"buffer":58,"dup":26,"readable-stream/duplex":604,"util":396}],413:[function(require,module,exports){
 arguments[4][62][0].apply(exports,arguments)
-},{"dup":62}],413:[function(require,module,exports){
+},{"dup":62}],414:[function(require,module,exports){
 arguments[4][63][0].apply(exports,arguments)
-},{"dup":63}],414:[function(require,module,exports){
+},{"dup":63}],415:[function(require,module,exports){
 (function (Buffer){
 var util = require('util');
 var Stream = require('stream').Stream;
@@ -99222,7 +99285,7 @@ CombinedStream.prototype._emitError = function(err) {
 };
 
 }).call(this,{"isBuffer":require("../../../client/node_modules/is-buffer/index.js")})
-},{"../../../client/node_modules/is-buffer/index.js":155,"delayed-stream":418,"stream":349,"util":396}],415:[function(require,module,exports){
+},{"../../../client/node_modules/is-buffer/index.js":155,"delayed-stream":419,"stream":349,"util":396}],416:[function(require,module,exports){
 (function (Buffer){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -99333,25 +99396,25 @@ function objectToString(o) {
 }
 
 }).call(this,{"isBuffer":require("../../../client/node_modules/is-buffer/index.js")})
-},{"../../../client/node_modules/is-buffer/index.js":155}],416:[function(require,module,exports){
+},{"../../../client/node_modules/is-buffer/index.js":155}],417:[function(require,module,exports){
 arguments[4][73][0].apply(exports,arguments)
-},{"./debug":417,"dup":73}],417:[function(require,module,exports){
+},{"./debug":418,"dup":73}],418:[function(require,module,exports){
 arguments[4][74][0].apply(exports,arguments)
-},{"dup":74,"ms":558}],418:[function(require,module,exports){
+},{"dup":74,"ms":591}],419:[function(require,module,exports){
 arguments[4][75][0].apply(exports,arguments)
-},{"dup":75,"stream":349,"util":396}],419:[function(require,module,exports){
+},{"dup":75,"stream":349,"util":396}],420:[function(require,module,exports){
 arguments[4][86][0].apply(exports,arguments)
-},{"_process":279,"dup":86,"stream":349}],420:[function(require,module,exports){
+},{"_process":279,"dup":86,"stream":349}],421:[function(require,module,exports){
 arguments[4][87][0].apply(exports,arguments)
-},{"./lib/ec.js":421,"./lib/sec.js":422,"buffer":58,"crypto":72,"dup":87,"jsbn":473}],421:[function(require,module,exports){
+},{"./lib/ec.js":422,"./lib/sec.js":423,"buffer":58,"crypto":72,"dup":87,"jsbn":474}],422:[function(require,module,exports){
 arguments[4][88][0].apply(exports,arguments)
-},{"dup":88,"jsbn":473}],422:[function(require,module,exports){
+},{"dup":88,"jsbn":474}],423:[function(require,module,exports){
 arguments[4][89][0].apply(exports,arguments)
-},{"./ec.js":421,"dup":89,"jsbn":473}],423:[function(require,module,exports){
+},{"./ec.js":422,"dup":89,"jsbn":474}],424:[function(require,module,exports){
 arguments[4][90][0].apply(exports,arguments)
-},{"../package.json":425,"./utils":424,"dup":90,"fs":56,"path":274}],424:[function(require,module,exports){
+},{"../package.json":426,"./utils":425,"dup":90,"fs":56,"path":274}],425:[function(require,module,exports){
 arguments[4][91][0].apply(exports,arguments)
-},{"dup":91}],425:[function(require,module,exports){
+},{"dup":91}],426:[function(require,module,exports){
 module.exports={
   "_args": [
     [
@@ -99455,65 +99518,65 @@ module.exports={
   "version": "2.3.4"
 }
 
-},{}],426:[function(require,module,exports){
+},{}],427:[function(require,module,exports){
 arguments[4][110][0].apply(exports,arguments)
-},{"dup":110}],427:[function(require,module,exports){
+},{"dup":110}],428:[function(require,module,exports){
 arguments[4][113][0].apply(exports,arguments)
-},{"dup":113}],428:[function(require,module,exports){
+},{"dup":113}],429:[function(require,module,exports){
 arguments[4][114][0].apply(exports,arguments)
-},{"assert":22,"dup":114,"util":396}],429:[function(require,module,exports){
+},{"assert":22,"dup":114,"util":396}],430:[function(require,module,exports){
 arguments[4][115][0].apply(exports,arguments)
-},{"dup":115,"http":350,"https":150,"net":56,"tls":56,"util":396}],430:[function(require,module,exports){
+},{"dup":115,"http":350,"https":150,"net":56,"tls":56,"util":396}],431:[function(require,module,exports){
 arguments[4][116][0].apply(exports,arguments)
-},{"dup":116}],431:[function(require,module,exports){
+},{"dup":116}],432:[function(require,module,exports){
 arguments[4][117][0].apply(exports,arguments)
-},{"dup":117,"util":396}],432:[function(require,module,exports){
+},{"dup":117,"util":396}],433:[function(require,module,exports){
 arguments[4][118][0].apply(exports,arguments)
-},{"dup":118,"is-property":463}],433:[function(require,module,exports){
+},{"dup":118,"is-property":464}],434:[function(require,module,exports){
 arguments[4][119][0].apply(exports,arguments)
-},{"dup":119}],434:[function(require,module,exports){
+},{"dup":119}],435:[function(require,module,exports){
 arguments[4][120][0].apply(exports,arguments)
-},{"./runner":435,"./schemas":443,"dup":120,"pinkie-promise":564}],435:[function(require,module,exports){
+},{"./runner":436,"./schemas":444,"dup":120,"pinkie-promise":597}],436:[function(require,module,exports){
 arguments[4][121][0].apply(exports,arguments)
-},{"./error":433,"./schemas":443,"dup":121,"is-my-json-valid":461}],436:[function(require,module,exports){
+},{"./error":434,"./schemas":444,"dup":121,"is-my-json-valid":462}],437:[function(require,module,exports){
 arguments[4][122][0].apply(exports,arguments)
-},{"dup":122}],437:[function(require,module,exports){
+},{"dup":122}],438:[function(require,module,exports){
 arguments[4][123][0].apply(exports,arguments)
-},{"dup":123}],438:[function(require,module,exports){
+},{"dup":123}],439:[function(require,module,exports){
 arguments[4][124][0].apply(exports,arguments)
-},{"dup":124}],439:[function(require,module,exports){
+},{"dup":124}],440:[function(require,module,exports){
 arguments[4][125][0].apply(exports,arguments)
-},{"dup":125}],440:[function(require,module,exports){
+},{"dup":125}],441:[function(require,module,exports){
 arguments[4][126][0].apply(exports,arguments)
-},{"dup":126}],441:[function(require,module,exports){
+},{"dup":126}],442:[function(require,module,exports){
 arguments[4][127][0].apply(exports,arguments)
-},{"dup":127}],442:[function(require,module,exports){
+},{"dup":127}],443:[function(require,module,exports){
 arguments[4][128][0].apply(exports,arguments)
-},{"dup":128}],443:[function(require,module,exports){
+},{"dup":128}],444:[function(require,module,exports){
 arguments[4][129][0].apply(exports,arguments)
-},{"./cache.json":436,"./cacheEntry.json":437,"./content.json":438,"./cookie.json":439,"./creator.json":440,"./entry.json":441,"./har.json":442,"./log.json":444,"./page.json":445,"./pageTimings.json":446,"./postData.json":447,"./record.json":448,"./request.json":449,"./response.json":450,"./timings.json":451,"dup":129}],444:[function(require,module,exports){
+},{"./cache.json":437,"./cacheEntry.json":438,"./content.json":439,"./cookie.json":440,"./creator.json":441,"./entry.json":442,"./har.json":443,"./log.json":445,"./page.json":446,"./pageTimings.json":447,"./postData.json":448,"./record.json":449,"./request.json":450,"./response.json":451,"./timings.json":452,"dup":129}],445:[function(require,module,exports){
 arguments[4][130][0].apply(exports,arguments)
-},{"dup":130}],445:[function(require,module,exports){
+},{"dup":130}],446:[function(require,module,exports){
 arguments[4][131][0].apply(exports,arguments)
-},{"dup":131}],446:[function(require,module,exports){
+},{"dup":131}],447:[function(require,module,exports){
 arguments[4][132][0].apply(exports,arguments)
-},{"dup":132}],447:[function(require,module,exports){
+},{"dup":132}],448:[function(require,module,exports){
 arguments[4][133][0].apply(exports,arguments)
-},{"dup":133}],448:[function(require,module,exports){
+},{"dup":133}],449:[function(require,module,exports){
 arguments[4][134][0].apply(exports,arguments)
-},{"dup":134}],449:[function(require,module,exports){
+},{"dup":134}],450:[function(require,module,exports){
 arguments[4][135][0].apply(exports,arguments)
-},{"dup":135}],450:[function(require,module,exports){
+},{"dup":135}],451:[function(require,module,exports){
 arguments[4][136][0].apply(exports,arguments)
-},{"dup":136}],451:[function(require,module,exports){
+},{"dup":136}],452:[function(require,module,exports){
 arguments[4][137][0].apply(exports,arguments)
-},{"dup":137}],452:[function(require,module,exports){
+},{"dup":137}],453:[function(require,module,exports){
 arguments[4][144][0].apply(exports,arguments)
-},{"dup":144}],453:[function(require,module,exports){
+},{"dup":144}],454:[function(require,module,exports){
 arguments[4][145][0].apply(exports,arguments)
-},{"./parser":454,"./signer":455,"./utils":456,"./verify":457,"dup":145}],454:[function(require,module,exports){
+},{"./parser":455,"./signer":456,"./utils":457,"./verify":458,"dup":145}],455:[function(require,module,exports){
 arguments[4][146][0].apply(exports,arguments)
-},{"./utils":456,"assert-plus":407,"dup":146,"util":396}],455:[function(require,module,exports){
+},{"./utils":457,"assert-plus":408,"dup":146,"util":396}],456:[function(require,module,exports){
 (function (Buffer){
 // Copyright 2012 Joyent, Inc.  All rights reserved.
 
@@ -99911,37 +99974,37 @@ module.exports = {
 };
 
 }).call(this,{"isBuffer":require("../../../client/node_modules/is-buffer/index.js")})
-},{"../../../client/node_modules/is-buffer/index.js":155,"./utils":456,"assert-plus":407,"crypto":72,"http":350,"jsprim":477,"sshpk":602,"util":396}],456:[function(require,module,exports){
+},{"../../../client/node_modules/is-buffer/index.js":155,"./utils":457,"assert-plus":408,"crypto":72,"http":350,"jsprim":478,"sshpk":635,"util":396}],457:[function(require,module,exports){
 arguments[4][148][0].apply(exports,arguments)
-},{"assert-plus":407,"dup":148,"sshpk":602,"util":396}],457:[function(require,module,exports){
+},{"assert-plus":408,"dup":148,"sshpk":635,"util":396}],458:[function(require,module,exports){
 arguments[4][149][0].apply(exports,arguments)
-},{"./utils":456,"assert-plus":407,"buffer":58,"crypto":72,"dup":149,"sshpk":602}],458:[function(require,module,exports){
+},{"./utils":457,"assert-plus":408,"buffer":58,"crypto":72,"dup":149,"sshpk":635}],459:[function(require,module,exports){
 arguments[4][153][0].apply(exports,arguments)
-},{"dup":153}],459:[function(require,module,exports){
+},{"dup":153}],460:[function(require,module,exports){
 arguments[4][154][0].apply(exports,arguments)
-},{"dup":154}],460:[function(require,module,exports){
+},{"dup":154}],461:[function(require,module,exports){
 arguments[4][156][0].apply(exports,arguments)
-},{"dup":156}],461:[function(require,module,exports){
+},{"dup":156}],462:[function(require,module,exports){
 arguments[4][157][0].apply(exports,arguments)
-},{"./formats":460,"dup":157,"generate-function":431,"generate-object-property":432,"jsonpointer":476,"xtend":462}],462:[function(require,module,exports){
+},{"./formats":461,"dup":157,"generate-function":432,"generate-object-property":433,"jsonpointer":477,"xtend":463}],463:[function(require,module,exports){
 arguments[4][158][0].apply(exports,arguments)
-},{"dup":158}],463:[function(require,module,exports){
+},{"dup":158}],464:[function(require,module,exports){
 arguments[4][159][0].apply(exports,arguments)
-},{"dup":159}],464:[function(require,module,exports){
+},{"dup":159}],465:[function(require,module,exports){
 arguments[4][160][0].apply(exports,arguments)
-},{"dup":160}],465:[function(require,module,exports){
+},{"dup":160}],466:[function(require,module,exports){
 arguments[4][161][0].apply(exports,arguments)
-},{"dup":161}],466:[function(require,module,exports){
+},{"dup":161}],467:[function(require,module,exports){
 arguments[4][162][0].apply(exports,arguments)
-},{"dup":162,"stream":349}],467:[function(require,module,exports){
+},{"dup":162,"stream":349}],468:[function(require,module,exports){
 arguments[4][163][0].apply(exports,arguments)
-},{"./lib/curve255":469,"./lib/dh":470,"./lib/eddsa":471,"./lib/utils":472,"dup":163}],468:[function(require,module,exports){
+},{"./lib/curve255":470,"./lib/dh":471,"./lib/eddsa":472,"./lib/utils":473,"dup":163}],469:[function(require,module,exports){
 arguments[4][164][0].apply(exports,arguments)
-},{"crypto":72,"dup":164}],469:[function(require,module,exports){
+},{"crypto":72,"dup":164}],470:[function(require,module,exports){
 arguments[4][165][0].apply(exports,arguments)
-},{"./core":468,"./utils":472,"dup":165}],470:[function(require,module,exports){
+},{"./core":469,"./utils":473,"dup":165}],471:[function(require,module,exports){
 arguments[4][166][0].apply(exports,arguments)
-},{"./core":468,"./curve255":469,"./utils":472,"buffer":58,"dup":166}],471:[function(require,module,exports){
+},{"./core":469,"./curve255":470,"./utils":473,"buffer":58,"dup":166}],472:[function(require,module,exports){
 (function (Buffer){
 "use strict";
 /**
@@ -100518,21 +100581,5680 @@ var crypto = require('crypto');
 module.exports = ns;
 
 }).call(this,{"isBuffer":require("../../../client/node_modules/is-buffer/index.js")})
-},{"../../../client/node_modules/is-buffer/index.js":155,"./core":468,"./curve255":469,"./utils":472,"crypto":72,"jsbn":473}],472:[function(require,module,exports){
+},{"../../../client/node_modules/is-buffer/index.js":155,"./core":469,"./curve255":470,"./utils":473,"crypto":72,"jsbn":474}],473:[function(require,module,exports){
 arguments[4][168][0].apply(exports,arguments)
-},{"./core":468,"dup":168}],473:[function(require,module,exports){
+},{"./core":469,"dup":168}],474:[function(require,module,exports){
 arguments[4][169][0].apply(exports,arguments)
-},{"dup":169}],474:[function(require,module,exports){
+},{"dup":169}],475:[function(require,module,exports){
 arguments[4][170][0].apply(exports,arguments)
-},{"dup":170}],475:[function(require,module,exports){
+},{"dup":170}],476:[function(require,module,exports){
 arguments[4][171][0].apply(exports,arguments)
-},{"dup":171}],476:[function(require,module,exports){
+},{"dup":171}],477:[function(require,module,exports){
 arguments[4][172][0].apply(exports,arguments)
-},{"dup":172}],477:[function(require,module,exports){
+},{"dup":172}],478:[function(require,module,exports){
 arguments[4][173][0].apply(exports,arguments)
-},{"assert":22,"dup":173,"extsprintf":428,"json-schema":474,"util":396,"verror":647}],478:[function(require,module,exports){
+},{"assert":22,"dup":173,"extsprintf":429,"json-schema":475,"util":396,"verror":680}],479:[function(require,module,exports){
+require('strongloop-license')('connectors:mssql');
+module.exports = require("./lib/mssql.js");
+
+},{"./lib/mssql.js":482,"strongloop-license":500}],480:[function(require,module,exports){
+module.exports = mixinDiscovery;
+
+function mixinDiscovery(MsSQL) {
+  var async = require('async');
+
+  function paginateSQL2012(sql, orderBy, options) {
+    options = options || {};
+    var offset = options.offset || options.skip;
+    if (isNaN(offset)) {
+      offset = 0;
+    }
+    var limit = options.limit;
+    if (isNaN(limit)) {
+      limit = -1;
+    }
+    if (offset === 0 && limit === -1) {
+      return sql;
+    }
+
+    var fetch = '';
+    if (options.offset || options.skip || options.limit) {
+      fetch = ' OFFSET ' + offset + ' ROWS'; // Offset starts from 0
+      if (options.limit) {
+        fetch = fetch + ' FETCH NEXT ' + options.limit + 'ROWS ONLY';
+      }
+      if(!orderBy) {
+        sql += ' ORDER BY 1';
+      }
+    }
+    if (orderBy) {
+      sql += ' ORDER BY ' + orderBy;
+    }
+    return sql + fetch;
+  }
+
+  function paginateSQL(sql, orderBy, options) {
+    options = options || {};
+    var offset = options.offset || options.skip;
+    if (isNaN(offset)) {
+      offset = 0;
+    }
+    var limit = options.limit;
+    if (isNaN(limit)) {
+      limit = -1;
+    }
+    if (offset === 0 && limit === -1) {
+      return sql;
+    }
+    var index = sql.indexOf(' FROM');
+    var select = sql.substring(0, index);
+    var from = sql.substring(index);
+    if (orderBy) {
+      orderBy = 'ORDER BY ' + orderBy;
+    } else {
+      orderBy = 'ORDER BY 1';
+    }
+    var paginatedSQL = 'SELECT *' + MsSQL.newline
+      + 'FROM (' + MsSQL.newline
+      + select + ', ROW_NUMBER() OVER'
+      + ' (' + orderBy + ') AS rowNum' + MsSQL.newline
+      + from + MsSQL.newline;
+    paginatedSQL += ') AS S' + MsSQL.newline
+      + 'WHERE S.rowNum > ' + offset;
+
+    if (limit !== -1) {
+      paginatedSQL += ' AND S.rowNum <= ' + (offset + limit);
+    }
+
+    return paginatedSQL + MsSQL.newline;
+  }
+
+  /*!
+   * Build sql for listing tables
+   * @param options {all: for all owners, owner: for a given owner}
+   * @returns {string} The sql statement
+   */
+  function queryTables(options) {
+    var sqlTables = null;
+    var owner = options.owner || options.schema;
+
+    if (options.all && !owner) {
+      sqlTables = paginateSQL('SELECT \'table\' AS "type", table_name AS "name", table_schema AS "owner"'
+        + ' FROM information_schema.tables', 'table_schema, table_name', options);
+    } else if (owner) {
+      sqlTables = paginateSQL('SELECT \'table\' AS "type", table_name AS "name", table_schema AS "owner"'
+        + ' FROM information_schema.tables WHERE table_schema=\'' + owner + '\'', 'table_schema, table_name', options);
+    } else {
+      sqlTables = paginateSQL('SELECT \'table\' AS "type", table_name AS "name",'
+          + ' table_schema AS "owner" FROM information_schema.tables WHERE table_schema=schema_name()',
+        'table_name', options);
+    }
+    return sqlTables;
+  }
+
+  /*!
+   * Build sql for listing views
+   * @param options {all: for all owners, owner: for a given owner}
+   * @returns {string} The sql statement
+   */
+  function queryViews(options) {
+    var sqlViews = null;
+    if (options.views) {
+
+      var owner = options.owner || options.schema;
+
+      if (options.all && !owner) {
+        sqlViews = paginateSQL('SELECT \'view\' AS "type", table_name AS "name",'
+            + ' table_schema AS "owner" FROM information_schema.views',
+          'table_schema, table_name', options);
+      } else if (owner) {
+        sqlViews = paginateSQL('SELECT \'view\' AS "type", table_name AS "name",'
+            + ' table_schema AS "owner" FROM information_schema.views WHERE table_schema=\'' + owner + '\'',
+          'table_schema, table_name', options);
+      } else {
+        sqlViews = paginateSQL('SELECT \'view\' AS "type", table_name AS "name",'
+            + ' schema_name() AS "owner" FROM information_schema.views',
+          'table_name', options);
+      }
+    }
+    return sqlViews;
+  }
+
+  /**
+   * Discover model definitions
+   *
+   * @param {Object} options Options for discovery
+   * @param {Function} [cb] The callback function
+   */
+  MsSQL.prototype.discoverModelDefinitions = function (options, cb) {
+    if (!cb && typeof options === 'function') {
+      cb = options;
+      options = {};
+    }
+    options = options || {};
+
+    var self = this;
+    var calls = [function (callback) {
+      self.execute(queryTables(options), callback);
+    }];
+
+    if (options.views) {
+      calls.push(function (callback) {
+        self.execute(queryViews(options), callback);
+      });
+    }
+    async.parallel(calls, function (err, data) {
+      if (err) {
+        cb(err, data);
+      } else {
+        var merged = [];
+        merged = merged.concat(data.shift());
+        if (data.length) {
+          merged = merged.concat(data.shift());
+        }
+        cb(err, merged);
+      }
+    });
+  };
+
+  /*!
+   * Normalize the arguments
+   * @param table string, required
+   * @param options object, optional
+   * @param cb function, optional
+   */
+  function getArgs(table, options, cb) {
+    if ('string' !== typeof table || !table) {
+      throw new Error('table is a required string argument: ' + table);
+    }
+    options = options || {};
+    if (!cb && 'function' === typeof options) {
+      cb = options;
+      options = {};
+    }
+    if (typeof options !== 'object') {
+      throw new Error('options must be an object: ' + options);
+    }
+    return {
+      owner: options.owner || options.schema,
+      table: table,
+      options: options,
+      cb: cb
+    };
+  }
+
+  /*!
+   * Build the sql statement to query columns for a given table
+   * @param owner
+   * @param table
+   * @returns {String} The sql statement
+   */
+  function queryColumns(owner, table) {
+    var sql = null;
+    if (owner) {
+      sql = paginateSQL('SELECT table_schema AS "owner", table_name AS "tableName", column_name AS "columnName", data_type AS "dataType",'
+          + ' character_maximum_length AS "dataLength", numeric_precision AS "dataPrecision", numeric_scale AS "dataScale", is_nullable AS "nullable"'
+          + ' FROM information_schema.columns'
+          + ' WHERE table_schema=\'' + owner + '\''
+          + (table ? ' AND table_name=\'' + table + '\'' : ''),
+        'table_schema, table_name, ordinal_position', {});
+    } else {
+      sql = paginateSQL('SELECT schema_name() AS "owner", table_name AS "tableName", column_name AS "columnName", data_type AS "dataType",'
+          + ' character_maximum_length AS "dataLength", numeric_precision AS "dataPrecision", numeric_scale AS "dataScale", is_nullable AS "nullable"'
+          + ' FROM information_schema.columns'
+          + (table ? ' WHERE table_name=\'' + table + '\'' : ''),
+        'table_name, ordinal_position', {});
+    }
+    return sql;
+  }
+
+  /**
+   * Discover model properties from a table
+   * @param {String} table The table name
+   * @param {Object} options The options for discovery
+   * @param {Function} [cb] The callback function
+   *
+   */
+  MsSQL.prototype.discoverModelProperties = function (table, options, cb) {
+    var args = getArgs(table, options, cb);
+    var owner = args.owner;
+    table = args.table;
+    options = args.options;
+    cb = args.cb;
+
+    var sql = queryColumns(owner, table);
+    var callback = function (err, results) {
+      if (err) {
+        cb(err, results);
+      } else {
+        results.map(function (r) {
+          r.type = mysqlDataTypeToJSONType(r.dataType, r.dataLength);
+        });
+        cb(err, results);
+      }
+    };
+    this.execute(sql, callback);
+  };
+
+  /*!
+   * Build the sql statement for querying primary keys of a given table
+   * @param owner
+   * @param table
+   * @returns {string}
+   */
+// http://docs.oracle.com/javase/6/docs/api/java/sql/DatabaseMetaData.html#getPrimaryKeys(java.lang.String, java.lang.String, java.lang.String)
+
+  /*
+   select tc.table_schema, tc.table_name, kc.column_name
+   from
+   information_schema.table_constraints tc
+   join information_schema.key_column_usage kc
+   on kc.table_name = tc.table_name and kc.table_schema = tc.table_schema
+   where
+   tc.constraint_type = 'PRIMARY KEY'
+   and kc.ordinal_position is not null
+   order by tc.table_schema,
+   tc.table_name,
+   kc.ordinal_position;
+   */
+
+  function queryForPrimaryKeys(owner, table) {
+    var sql = 'SELECT kc.table_schema AS "owner", '
+      + 'kc.table_name AS "tableName", kc.column_name AS "columnName", kc.ordinal_position AS "keySeq", kc.constraint_name AS "pkName" FROM'
+      + ' information_schema.key_column_usage kc'
+      + ' JOIN information_schema.table_constraints tc'
+      + ' ON kc.table_name = tc.table_name AND kc.table_schema = tc.table_schema'
+      + ' WHERE tc.constraint_type=\'PRIMARY KEY\' AND kc.ordinal_position IS NOT NULL';
+
+    if (owner) {
+      sql += ' AND kc.table_schema=\'' + owner + '\'';
+    }
+    if (table) {
+      sql += ' AND kc.table_name=\'' + table + '\'';
+    }
+    sql += ' ORDER BY kc.table_schema, kc.table_name, kc.ordinal_position';
+    return sql;
+  }
+
+  /**
+   * Discover primary keys for a given table
+   * @param {String} table The table name
+   * @param {Object} options The options for discovery
+   * @param {Function} [cb] The callback function
+   */
+  MsSQL.prototype.discoverPrimaryKeys = function (table, options, cb) {
+    var args = getArgs(table, options, cb);
+    var owner = args.owner;
+    table = args.table;
+    options = args.options;
+    cb = args.cb;
+
+    var sql = queryForPrimaryKeys(owner, table);
+    this.execute(sql, cb);
+  };
+
+  /*!
+   * Build the sql statement for querying foreign keys of a given table
+   * @param owner
+   * @param table
+   * @returns {string}
+   */
+  /*
+   SELECT
+   tc.constraint_name, tc.table_name, kcu.column_name,
+   ccu.table_name AS foreign_table_name,
+   ccu.column_name AS foreign_column_name
+   FROM
+   information_schema.table_constraints AS tc
+   JOIN information_schema.key_column_usage AS kcu
+   ON tc.constraint_name = kcu.constraint_name
+   JOIN information_schema.constraint_column_usage AS ccu
+   ON ccu.constraint_name = tc.constraint_name
+   WHERE constraint_type = 'FOREIGN KEY' AND tc.table_name='mytable';
+
+   */
+  function queryForeignKeys(owner, table) {
+    var sql =
+      'SELECT tc.table_schema AS "fkOwner", tc.constraint_name AS "fkName", tc.table_name AS "fkTableName",'
+      + ' kcu.column_name AS "fkColumnName", kcu.ordinal_position AS "keySeq",'
+      + ' ccu.table_schema AS "pkOwner", \'PK\' AS "pkName", '
+      + ' ccu.table_name AS "pkTableName", ccu.column_name AS "pkColumnName"'
+      + ' FROM information_schema.table_constraints tc'
+      + ' JOIN information_schema.key_column_usage AS kcu'
+      + ' ON tc.constraint_schema = kcu.constraint_schema AND tc.constraint_name = kcu.constraint_name'
+      + ' JOIN information_schema.constraint_column_usage ccu'
+      + ' ON ccu.constraint_schema = tc.constraint_schema AND ccu.constraint_name = tc.constraint_name'
+      + ' WHERE tc.constraint_type = \'FOREIGN KEY\'';
+    if (owner) {
+      sql += ' AND tc.table_schema=\'' + owner + '\'';
+    }
+    if (table) {
+      sql += ' AND tc.table_name=\'' + table + '\'';
+    }
+    return sql;
+  }
+
+  /**
+   * Discover foreign keys for a given table
+   * @param {String} table The table name
+   * @param {Object} options The options for discovery
+   * @param {Function} [cb] The callback function
+   */
+  MsSQL.prototype.discoverForeignKeys = function (table, options, cb) {
+    var args = getArgs(table, options, cb);
+    var owner = args.owner;
+    table = args.table;
+    options = args.options;
+    cb = args.cb;
+
+    var sql = queryForeignKeys(owner, table);
+    this.execute(sql, cb);
+  };
+
+  /*!
+   * Retrieves a description of the foreign key columns that reference the given table's primary key columns (the foreign keys exported by a table).
+   * They are ordered by fkTableOwner, fkTableName, and keySeq.
+   * @param owner
+   * @param table
+   * @returns {string}
+   */
+  function queryExportedForeignKeys(owner, table) {
+    var sql = 'SELECT kcu.constraint_name AS "fkName", kcu.table_schema AS "fkOwner", kcu.table_name AS "fkTableName",'
+      + ' kcu.column_name AS "fkColumnName", kcu.ordinal_position AS "keySeq",'
+      + ' \'PK\' AS "pkName", ccu.table_schema AS "pkOwner",'
+      + ' ccu.table_name AS "pkTableName", ccu.column_name AS "pkColumnName"'
+      + ' FROM'
+      + ' information_schema.constraint_column_usage ccu'
+      + ' JOIN information_schema.key_column_usage kcu'
+      + ' ON ccu.constraint_schema = kcu.constraint_schema AND ccu.constraint_name = kcu.constraint_name'
+      + ' WHERE kcu.ordinal_position IS NOT NULL';
+    if (owner) {
+      sql += ' and ccu.table_schema=\'' + owner + '\'';
+    }
+    if (table) {
+      sql += ' and ccu.table_name=\'' + table + '\'';
+    }
+    sql += ' order by kcu.table_schema, kcu.table_name, kcu.ordinal_position';
+
+    return sql;
+  }
+
+  /**
+   * Discover foreign keys that reference to the primary key of this table
+   * @param {String} table The table name
+   * @param {Object} options The options for discovery
+   * @param {Function} [cb] The callback function
+   */
+  MsSQL.prototype.discoverExportedForeignKeys = function (table, options, cb) {
+    var args = getArgs(table, options, cb);
+    var owner = args.owner;
+    table = args.table;
+    options = args.options;
+    cb = args.cb;
+
+    var sql = queryExportedForeignKeys(owner, table);
+    this.execute(sql, cb);
+  };
+
+  function mysqlDataTypeToJSONType(mysqlType, dataLength) {
+    var type = mysqlType.toUpperCase();
+    switch (type) {
+      case 'BIT':
+        return 'Boolean';
+
+      case 'CHAR':
+      case 'VARCHAR':
+      case 'TEXT':
+
+      case 'NCHAR':
+      case 'NVARCHAR':
+      case 'NTEXT':
+
+      case 'CHARACTER VARYING':
+      case 'CHARACTER':
+        return 'String';
+
+      case 'BINARY':
+      case 'VARBINARY':
+      case 'IMAGE':
+        return 'Binary';
+
+      case 'BIGINT':
+      case 'NUMERIC':
+      case 'SMALLINT':
+      case 'DECIMAL':
+      case 'SMALLMONEY':
+      case 'INT':
+      case 'TINYINT':
+      case 'MONEY':
+      case 'FLOAT':
+      case 'REAL':
+        return 'Number';
+
+      case 'DATE':
+      case 'DATETIMEOFFSET':
+      case 'DATETIME2':
+      case 'SMALLDATETIME':
+      case 'DATETIME':
+      case 'TIME':
+        return 'Date';
+
+      case 'POINT':
+        return 'GeoPoint';
+      default:
+        return 'String';
+    }
+  }
+}
+
+},{"async":409}],481:[function(require,module,exports){
+(function (process){
+var async = require('async');
+
+module.exports = mixinMigration;
+
+function mixinMigration(MsSQL) {
+  MsSQL.prototype.showFields = function(model, cb) {
+    var sql = 'select [COLUMN_NAME] as [Field], '
+      + ' [IS_NULLABLE] as [Null], [DATA_TYPE] as [Type],'
+      + ' [CHARACTER_MAXIMUM_LENGTH] as [Length],'
+      + ' [NUMERIC_PRECISION] as [Precision], NUMERIC_SCALE as [Scale]'
+      + ' from INFORMATION_SCHEMA.COLUMNS'
+      + ' where [TABLE_SCHEMA] = \'' + this.schema(model) + '\''
+      + ' and [TABLE_NAME] = \'' + this.table(model) + '\''
+      + ' order by [ORDINAL_POSITION]'
+    this.execute(sql, function(err, fields) {
+      if (err) {
+        return cb && cb(err);
+      } else {
+        if (Array.isArray(fields)) {
+          fields.forEach(function(f) {
+            if (f.Length) {
+              f.Type = f.Type + '(' + f.Length + ')';
+            } else if (f.Precision) {
+              f.Type = f.Type + '(' + f.Precision, +',' + f.Scale + ')';
+            }
+          });
+        }
+        cb && cb(err, fields);
+      }
+    });
+  };
+
+  MsSQL.prototype.showIndexes = function(model, cb) {
+    // TODO: [rfeng] Implement SHOW INDEXES
+    /*
+     var schema = "'" + this.schemaName(model) +"'";
+     var table = "'" + this.escapeName(this.table(model)) +"'";
+     var sql = "SELECT OBJECT_SCHEMA_NAME(T.[object_id],DB_ID()) AS [table_schema],"
+     + " T.[name] AS [table_name], I.[name] AS [index_name], AC.[name] AS [column_name],"
+     + " I.[type_desc], I.[is_unique], I.[data_space_id], I.[ignore_dup_key], I.[is_primary_key],"
+     + " I.[is_unique_constraint], I.[fill_factor], I.[is_padded], I.[is_disabled], I.[is_hypothetical],"
+     + " I.[allow_row_locks], I.[allow_page_locks], IC.[is_descending_key], IC.[is_included_column]"
+     + " FROM sys.[tables] AS T"
+     + " INNER JOIN sys.[indexes] I ON T.[object_id] = I.[object_id]"
+     + " INNER JOIN sys.[index_columns] IC ON I.[object_id] = IC.[object_id]"
+     + " INNER JOIN sys.[all_columns] AC ON T.[object_id] = AC.[object_id] AND IC.[column_id] = AC.[column_id]"
+     + " WHERE T.[is_ms_shipped] = 0 AND I.[type_desc] <> 'HEAP'"
+     + " AND OBJECT_SCHEMA_NAME(T.[object_id],DB_ID()) = " + schema + " AND T.[name] = " + table
+     + " ORDER BY T.[name], I.[index_id], IC.[key_ordinal]";
+
+     this.execute(sql, function (err, fields) {
+     cb && cb(err, fields);
+     });
+     */
+
+    process.nextTick(function() {
+      cb && cb(null, []);
+    });
+  };
+
+  MsSQL.prototype.autoupdate = function(models, cb) {
+    var self = this;
+    if ((!cb) && ('function' === typeof models)) {
+      cb = models;
+      models = undefined;
+    }
+    // First argument is a model name
+    if ('string' === typeof models) {
+      models = [models];
+    }
+
+    models = models || Object.keys(this._models);
+    async.each(models, function(model, done) {
+      if (!(model in self._models)) {
+        return process.nextTick(function() {
+          done(new Error('Model not found: ' + model));
+        });
+      }
+      self.showFields(model, function(err, fields) {
+        self.showIndexes(model, function(err, indexes) {
+          if (!err && fields.length) {
+            self.alterTable(model, fields, indexes, done);
+          } else {
+            self.createTable(model, done);
+          }
+        });
+      });
+    }, cb);
+  };
+
+  MsSQL.prototype.isActual = function(cb) {
+    var ok = false;
+    var self = this;
+    async.each(Object.keys(this._models), function(model, done) {
+      self.showFields(model, function(err, fields) {
+        self.showIndexes(model, function(err, indexes) {
+          self.alterTable(model, fields, indexes, function(err, needAlter) {
+            if (err) {
+              return done(err);
+            } else {
+              ok = ok || needAlter;
+              done(err);
+            }
+          }, true);
+        });
+      });
+    }, function(err) {
+      if (err) {
+        return err;
+      }
+      cb(null, !ok);
+    });
+  };
+
+  MsSQL.prototype.alterTable = function(model, actualFields, actualIndexes, done, checkOnly) {
+    var self = this;
+    var m = this._models[model];
+    var idName = this.idName(model);
+
+    var propNames = Object.keys(m.properties).filter(function(name) {
+      return !!m.properties[name];
+    });
+    var indexNames = m.settings.indexes ? Object.keys(m.settings.indexes).filter(function(name) {
+      return !!m.settings.indexes[name];
+    }) : [];
+    var sql = [];
+    var ai = {};
+
+    if (actualIndexes) {
+      actualIndexes.forEach(function(i) {
+        var name = i.Key_name;
+        if (!ai[name]) {
+          ai[name] = {
+            info: i,
+            columns: []
+          };
+        }
+        ai[name].columns[i.Seq_in_index - 1] = i.Column_name;
+      });
+    }
+    var aiNames = Object.keys(ai);
+
+    var columnsToAdd = [];
+    var columnsToDrop = [];
+    var columnsToAlter = [];
+
+    // change/add new fields
+    propNames.forEach(function(propName) {
+      if (propName === idName) return;
+      var found;
+      actualFields.forEach(function(f) {
+        if (f.Field === propName) {
+          found = f;
+        }
+      });
+
+      if (found) {
+        actualize(propName, found);
+      } else {
+        columnsToAdd.push(self.columnEscaped(model, propName) +
+          ' ' + self.propertySettingsSQL(model, propName));
+      }
+    });
+
+    // drop columns
+    actualFields.forEach(function(f) {
+      var notFound = !~propNames.indexOf(f.Field);
+      if (f.Field === idName) return;
+      if (notFound || !m.properties[f.Field]) {
+        columnsToDrop.push(self.columnEscaped(model, f.Field));
+      }
+    });
+
+    // remove indexes
+    aiNames.forEach(function(indexName) {
+      if (indexName === idName || indexName === 'PRIMARY') {
+        return;
+      }
+      if (indexNames.indexOf(indexName) === -1 && !m.properties[indexName]
+        || m.properties[indexName] && !m.properties[indexName].index) {
+        sql.push('DROP INDEX ' + self.columnEscaped(model, indexName));
+      } else {
+        // first: check single (only type and kind)
+        if (m.properties[indexName] && !m.properties[indexName].index) {
+          // TODO
+          return;
+        }
+        // second: check multiple indexes
+        var orderMatched = true;
+        if (indexNames.indexOf(indexName) !== -1) {
+          m.settings.indexes[indexName].columns.split(/,\s*/).forEach(function(columnName, i) {
+            if (ai[indexName].columns[i] !== columnName) {
+              orderMatched = false;
+            }
+          });
+        }
+        if (!orderMatched) {
+          sql.push('DROP INDEX [' + self.columnEscaped(model, indexName) + ']');
+          delete ai[indexName];
+        }
+      }
+    });
+
+    // add single-column indexes
+    propNames.forEach(function(propName) {
+      var i = m.properties[propName].index;
+      if (!i) {
+        return;
+      }
+      var found = ai[propName] && ai[propName].info;
+      var columnName = self.columnEscaped(model, propName);
+      if (!found) {
+        var type = '';
+        var kind = '';
+        if (i.type) {
+          type = 'USING ' + i.type;
+        }
+        if (i.kind) {
+          // kind = i.kind;
+        }
+        if (kind && type) {
+          sql.push('ADD ' + kind + ' INDEX ' + columnName
+            + ' (' + columnName + ') ' + type);
+        } else {
+          sql.push('ADD ' + kind + ' INDEX [' + propName + '] '
+            + type + ' ([' + propName + ']) ');
+        }
+      }
+    });
+
+    // add multi-column indexes
+    indexNames.forEach(function(indexName) {
+      var i = m.settings.indexes[indexName];
+      var found = ai[indexName] && ai[indexName].info;
+      if (!found) {
+        var type = '';
+        var kind = '';
+        if (i.type) {
+          type = 'USING ' + i.type;
+        }
+        if (i.kind) {
+          kind = i.kind;
+        }
+        if (kind && type) {
+          sql.push('ADD ' + kind + ' INDEX [' + indexName + '] ('
+            + i.columns + ') ' + type);
+        } else {
+          sql.push('ADD ' + kind + ' INDEX [' + indexName + '] ('
+            + i.columns + ') ');
+        }
+      }
+    });
+
+    var statements = [];
+    if (columnsToAdd.length) {
+      statements.push('ALTER TABLE ' + self.tableEscaped(model) + ' ADD '
+        + columnsToAdd.join(',' + MsSQL.newline));
+    }
+
+    if (columnsToAlter.length) {
+      // SQL Server doesn't allow multiple columns to be altered in one statement
+      columnsToAlter.forEach(function(c) {
+        statements.push('ALTER TABLE ' + self.tableEscaped(model) + ' ALTER COLUMN '
+          + c);
+      });
+    }
+
+    if (columnsToDrop.length) {
+      statements.push('ALTER TABLE ' + self.tableEscaped(model) + ' DROP COLUMN'
+        + columnsToDrop.join(',' + MsSQL.newline));
+    }
+
+    async.each(statements, function(query, fn) {
+      if (checkOnly) {
+        fn(null, true, {statements: statements, query: query});
+      } else {
+        self.execute(query, fn);
+      }
+    }, function(err, results) {
+      done && done(err, results);
+    });
+
+    function actualize(propName, oldSettings) {
+      var newSettings = m.properties[propName];
+      if (newSettings && changed(newSettings, oldSettings)) {
+        columnsToAlter.push(self.columnEscaped(model, propName) + ' '
+          + self.propertySettingsSQL(model, propName));
+      }
+    }
+
+    function changed(newSettings, oldSettings) {
+      if (oldSettings.Null === 'YES'
+        && (newSettings.allowNull === false || newSettings.null === false)) {
+        return true;
+      }
+      if (oldSettings.Null === 'NO' && !(newSettings.allowNull === false
+        || newSettings.null === false)) {
+        return true;
+      }
+      if (oldSettings.Type.toUpperCase() !== datatype(newSettings)) {
+        return true;
+      }
+      return false;
+    }
+  };
+
+  MsSQL.prototype.propertiesSQL = function(model) {
+    // debugger;
+    var self = this;
+    var objModel = this._models[model];
+    var modelPKID = this.idName(model);
+
+    var sql = [];
+    var props = Object.keys(objModel.properties);
+    for (var i = 0, n = props.length; i < n; i++) {
+      var prop = props[i];
+      if (prop === modelPKID) {
+        var idProp = objModel.properties[modelPKID];
+        if (idProp.type === Number) {
+          if (idProp.generated !== false) {
+            sql.push(self.columnEscaped(model, modelPKID) +
+              " " + self.columnDataType(model, modelPKID) + " IDENTITY(1,1) NOT NULL");
+          }
+          else {
+            sql.push(self.columnEscaped(model, modelPKID) +
+              " " + self.columnDataType(model, modelPKID) + " NOT NULL");
+          }
+          continue;
+        } else if (idProp.type === String) {
+          if (idProp.generated !== false) {
+            sql.push(self.columnEscaped(model, modelPKID) +
+              " [uniqueidentifier] DEFAULT newid() NOT NULL");
+          } else {
+            sql.push(self.columnEscaped(model, modelPKID) + " " +
+              self.propertySettingsSQL(model, prop) + " DEFAULT newid()");
+          }
+          continue;
+        }
+      }
+      sql.push(self.columnEscaped(model, prop) + " " + self.propertySettingsSQL(model, prop));
+    }
+    var joinedSql = sql.join("," + MsSQL.newline + "    ");
+    var cmd = "";
+    if (modelPKID) {
+      cmd = "PRIMARY KEY CLUSTERED" + MsSQL.newline + "(" + MsSQL.newline;
+      cmd += " " + self.columnEscaped(model, modelPKID) + " ASC" + MsSQL.newline;
+      cmd += ") WITH (PAD_INDEX  = OFF, STATISTICS_NORECOMPUTE  = OFF, " +
+      "IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS  = ON, ALLOW_PAGE_LOCKS  = ON)"
+    }
+
+    joinedSql += "," + MsSQL.newline + cmd;
+
+    return joinedSql;
+  };
+
+  MsSQL.prototype.singleIndexSettingsSQL = function(model, prop, add) {
+    // Recycled from alterTable single indexes above, more or less.
+    var tblName = this.tableEscaped(model);
+    var i = this._models[model].properties[prop].index;
+    var type = 'ASC';
+    var kind = 'NONCLUSTERED';
+    var unique = false;
+    if (i.type) {
+      type = i.type;
+    }
+    if (i.kind) {
+      kind = i.kind;
+    }
+    if (i.unique) {
+      unique = true;
+    }
+    var name = prop + "_" + kind + "_" + type + "_idx"
+    if (i.name) {
+      name = i.name;
+    }
+    this._idxNames[model].push(name);
+    var cmd = "CREATE " + (unique ? "UNIQUE " : "") + kind + " INDEX [" + name + "] ON "
+      + tblName + MsSQL.newline;
+    cmd += "(" + MsSQL.newline;
+    cmd += "    [" + prop + "] " + type;
+    cmd += MsSQL.newline + ") WITH (PAD_INDEX  = OFF, STATISTICS_NORECOMPUTE = OFF," +
+      " SORT_IN_TEMPDB = OFF, IGNORE_DUP_KEY = OFF, DROP_EXISTING = OFF, " +
+      "ONLINE = OFF, ALLOW_ROW_LOCKS  = ON, ALLOW_PAGE_LOCKS  = ON);"
+      + MsSQL.newline;
+    return cmd;
+  };
+
+  MsSQL.prototype.indexSettingsSQL = function(model, prop) {
+    // Recycled from alterTable multi-column indexes above, more or less.
+    var tblName = this.tableEscaped(model);
+    var i = this._models[model].settings.indexes[prop];
+    var type = 'ASC';
+    var kind = 'NONCLUSTERED';
+    var unique = false;
+    if (i.type) {
+      type = i.type;
+    }
+    if (i.kind) {
+      kind = i.kind;
+    }
+    if (i.unique) {
+      unique = true;
+    }
+    var splitcolumns = i.columns.split(",");
+    var columns = [];
+    var name = "";
+    splitcolumns.forEach(function(elem, ind) {
+      var trimmed = elem.trim();
+      name += trimmed + "_";
+      trimmed = "[" + trimmed + "] " + type;
+      columns.push(trimmed);
+    });
+
+    name += kind + "_" + type + "_idx"
+    this._idxNames[model].push(name);
+
+    var cmd = "CREATE " + (unique ? "UNIQUE " : "") + kind + " INDEX [" + name + "] ON "
+      + tblName + MsSQL.newline;
+    cmd += "(" + MsSQL.newline;
+    cmd += columns.join("," + MsSQL.newline);
+    cmd += MsSQL.newline + ") WITH (PAD_INDEX  = OFF, STATISTICS_NORECOMPUTE = OFF, " +
+      "SORT_IN_TEMPDB = OFF, IGNORE_DUP_KEY = OFF, DROP_EXISTING = OFF, " +
+      "ONLINE = OFF, ALLOW_ROW_LOCKS  = ON, ALLOW_PAGE_LOCKS  = ON);"
+      + MsSQL.newline;
+    return cmd;
+  };
+
+  function isNullable(p) {
+    return !(p.required || p.id || p.nullable === false ||
+    p.allowNull === false || p['null'] === false);
+  }
+
+  MsSQL.prototype.propertySettingsSQL = function(model, prop) {
+    var p = this._models[model].properties[prop];
+    return this.columnDataType(model, prop) + ' ' +
+      (isNullable(p) ? 'NULL' : 'NOT NULL');
+  };
+
+  MsSQL.prototype.automigrate = function(models, cb) {
+    var self = this;
+    if ((!cb) && ('function' === typeof models)) {
+      cb = models;
+      models = undefined;
+    }
+    // First argument is a model name
+    if ('string' === typeof models) {
+      models = [models];
+    }
+
+    models = models || Object.keys(this._models);
+    async.each(models, function(model, done) {
+      if (!(model in self._models)) {
+        return process.nextTick(function() {
+          done(new Error('Model not found: ' + model));
+        });
+      }
+      self.dropTable(model, function(err) {
+        if (err) {
+          return done(err);
+        }
+        self.createTable(model, done);
+      });
+    }, function(err) {
+      cb && cb(err);
+    });
+  };
+
+  MsSQL.prototype.dropTable = function(model, cb) {
+    var tblName = this.tableEscaped(model);
+    var cmd = "IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'"
+      + tblName + "') AND type in (N'U'))";
+    cmd += MsSQL.newline + "BEGIN" + MsSQL.newline;
+    cmd += "    DROP TABLE " + tblName;
+    cmd += MsSQL.newline + "END";
+    this.execute(cmd, cb);
+  };
+
+  MsSQL.prototype.createTable = function(model, cb) {
+    var tblName = this.tableEscaped(model);
+    var cmd = "SET ANSI_NULLS ON;" + MsSQL.newline + "SET QUOTED_IDENTIFIER ON;"
+      + MsSQL.newline + "SET ANSI_PADDING ON;" + MsSQL.newline;
+    cmd += "IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'"
+      + tblName + "') AND type in (N'U'))" + MsSQL.newline + "BEGIN" + MsSQL.newline;
+    cmd += "CREATE TABLE " + this.tableEscaped(model) + " (";
+    cmd += MsSQL.newline + "    " + this.propertiesSQL(model) + MsSQL.newline;
+    cmd += ")" + MsSQL.newline + "END;" + MsSQL.newline;
+    cmd += this.createIndexes(model);
+    this.execute(cmd, cb);
+  };
+
+  MsSQL.prototype.createIndexes = function(model) {
+    var self = this;
+    var sql = [];
+    // Declared in model index property indexes.
+    Object.keys(this._models[model].properties).forEach(function(prop) {
+      var i = self._models[model].properties[prop].index;
+      if (i) {
+        sql.push(self.singleIndexSettingsSQL(model, prop));
+      }
+    });
+
+    // Settings might not have an indexes property.
+    var dxs = this._models[model].settings.indexes;
+    if (dxs) {
+      Object.keys(this._models[model].settings.indexes).forEach(function(prop) {
+        sql.push(self.indexSettingsSQL(model, prop));
+      });
+    }
+
+    return sql.join(MsSQL.newline);
+  }
+
+  MsSQL.prototype.columnDataType = function(model, property) {
+    var columnMetadata = this.columnMetadata(model, property);
+    var colType = columnMetadata && columnMetadata.dataType;
+    if (colType) {
+      colType = colType.toUpperCase();
+    }
+    var prop = this._models[model].properties[property];
+    if (!prop) {
+      return null;
+    }
+    var colLength = columnMetadata && columnMetadata.dataLength || prop.length;
+    if (colType) {
+      var dataPrecision = columnMetadata.dataPrecision;
+      var dataScale = columnMetadata.dataScale;
+      if (dataPrecision && dataScale) {
+        return colType + '(' + dataPrecision + ', ' + dataScale + ')';
+      }
+      return colType + (colLength ? '(' + colLength + ')' : '');
+    }
+    return datatype(prop);
+  };
+
+  function datatype(p) {
+    var dt = '';
+    switch (p.type.name) {
+      default:
+      case 'String':
+      case 'JSON':
+        dt = '[nvarchar](' + (p.length || p.limit || 255) + ')';
+        break;
+      case 'Text':
+        dt = '[text]';
+        break;
+      case 'Number':
+        dt = '[int]';
+        break;
+      case 'Date':
+        dt = '[datetime]';
+        break;
+      case 'Boolean':
+        dt = '[bit]';
+        break;
+      case 'Point':
+        dt = '[float]';
+        break;
+    }
+    return dt;
+  }
+}
+
+}).call(this,require('_process'))
+},{"_process":279,"async":409}],482:[function(require,module,exports){
+(function (process){
+/*! Module dependencies */
+var mssql = require("mssql");
+var SqlConnector = require('loopback-connector').SqlConnector;
+var ParameterizedSQL = SqlConnector.ParameterizedSQL;
+var util = require("util");
+var debug = require('debug')('loopback:connector:mssql');
+
+var name = "mssql";
+
+exports.name = name;
+exports.initialize = function initializeSchema(dataSource, callback) {
+
+  var settings = dataSource.settings || {};
+  debug('Settings: %j', settings);
+  var driver = new MsSQL(settings);
+  dataSource.connector = driver;
+  driver.connect(function(err, connection) {
+    dataSource.client = connection;
+    dataSource.connector.dataSource = dataSource;
+    dataSource.connector.tableNameID = dataSource.settings.tableNameID;
+    callback && callback(err, connection);
+  });
+};
+
+function MsSQL(settings) {
+  MsSQL.super_.call(this, name, settings);
+  // this.name = name;
+  // this.settings = settings || {};
+  this.settings.server = this.settings.host || this.settings.hostname;
+  this.settings.user = this.settings.user || this.settings.username;
+  this._models = {};
+  this._idxNames = {};
+}
+
+util.inherits(MsSQL, SqlConnector);
+
+MsSQL.newline = "\r\n";
+
+/*!
+ * This is a workaround to the limitation that 'msssql' driver doesn't support
+ * parameterized SQL execution
+ * @param {String} sql The SQL string with parameters as (?)
+ * @param {*[]) params An array of parameter values
+ * @returns {*} The fulfilled SQL string
+ */
+function format(sql, params) {
+  if (Array.isArray(params)) {
+    var count = 0;
+    var index = -1;
+    while (count < params.length) {
+      index = sql.indexOf('(?)');
+      if (index === -1) {
+        return sql;
+      }
+      sql = sql.substring(0, index) + escape(params[count]) +
+        sql.substring(index + 3);
+      count++;
+    }
+  }
+  return sql;
+}
+
+MsSQL.prototype.connect = function(callback) {
+  var self = this;
+  if (self.client) {
+    return process.nextTick(callback);
+  }
+  var connection = new mssql.Connection(this.settings, function(err) {
+    if (err) {
+      debug('Connection error: ', err);
+      return callback(err);
+    }
+    debug('Connection established: ', self.settings.server);
+    self.client = connection;
+    callback(err, connection);
+  });
+};
+
+MsSQL.prototype.executeSQL = function(sql, params, options, callback) {
+  debug('SQL: %s Parameters: %j', sql, params);
+  if (Array.isArray(params) && params.length > 0) {
+    sql = format(sql, params);
+    debug('Formatted SQL: %s', sql);
+  }
+
+  var connection = this.client;
+
+  var transaction = options.transaction;
+  if (transaction && transaction.connector === this && transaction.connection) {
+    debug('Execute SQL in a transaction');
+    connection = transaction.connection;
+  }
+  var innerCB = function(err, data) {
+    debug('Result: %j %j', err, data);
+    callback && callback(err, data);
+  };
+
+  var request = new mssql.Request(connection);
+  // Allow multiple result sets
+  if (options.multipleResultSets) {
+    request.multiple = true;
+  }
+  // request.verbose = true;
+  request.query(sql, innerCB);
+};
+
+MsSQL.prototype.disconnect = function disconnect(cb) {
+  this.client.close(cb);
+};
+
+// MsSQL.prototype.command = function (sql, callback) {
+//     return this.execute(sql, callback);
+// };
+
+//params
+// descr = {
+//   model: ...
+//   properties: ...
+//   settings: ...
+// }
+MsSQL.prototype.define = function(modelDefinition) {
+  if (!modelDefinition.settings) {
+    modelDefinition.settings = {};
+  }
+
+  this._models[modelDefinition.model.modelName] = modelDefinition;
+
+  //track database index names for this model
+  this._idxNames[modelDefinition.model.modelName] = [];
+};
+
+MsSQL.prototype.getPlaceholderForValue = function(key) {
+  return '(?)';
+};
+
+MsSQL.prototype.buildInsertDefaultValues = function(model, data, options) {
+  return 'DEFAULT VALUES';
+};
+
+MsSQL.prototype.buildInsertInto = function(model, fields, options) {
+  var stmt = this.invokeSuper('buildInsertInto', model, fields, options);
+  var idName = this.idName(model);
+  if (idName) {
+    stmt.merge(MsSQL.newline + 'OUTPUT INSERTED.' +
+      this.columnEscaped(model, idName) + ' AS insertId');
+  }
+  return stmt;
+};
+
+MsSQL.prototype.buildInsert = function(model, data, options) {
+  var idName = this.idName(model);
+  var prop = this.getPropertyDefinition(model, idName);
+  var isIdentity = (prop && prop.type === Number && prop.generated !== false);
+  if (isIdentity && data[idName] == null) {
+    //remove the pkid column if it's in the data, since we're going to insert a
+    // new record, not update an existing one.
+    delete data[idName];
+    //delete the hardcoded id property that jugglindb automatically creates
+    // delete data.id;
+  }
+
+  var stmt = this.invokeSuper('buildInsert', model, data, options);
+  var tblName = this.tableEscaped(model);
+
+  if (isIdentity && data[idName] != null) {
+    stmt.sql = 'SET IDENTITY_INSERT ' + tblName + ' ON;' + MsSQL.newline +
+      stmt.sql;
+  }
+  if (isIdentity && data[idName] != null) {
+    stmt.sql += MsSQL.newline + 'SET IDENTITY_INSERT ' + tblName + ' OFF;' +
+      MsSQL.newline;
+  }
+  return stmt;
+};
+
+MsSQL.prototype.getInsertedId = function(model, info) {
+  return info && info.length > 0 && info[0].insertId;
+};
+
+MsSQL.prototype.buildDelete = function(model, where, options) {
+  var stmt = this.invokeSuper('buildDelete', model, where, options);
+  stmt.merge(';SELECT @@ROWCOUNT as count', '');
+  return stmt;
+};
+
+MsSQL.prototype.getCountForAffectedRows = function(model, info) {
+  var affectedCountQueryResult = info && info[0];
+  if (!affectedCountQueryResult) {
+    return undefined;
+  }
+  var affectedCount = typeof affectedCountQueryResult.count === 'number' ?
+    affectedCountQueryResult.count : undefined;
+  return affectedCount;
+};
+
+MsSQL.prototype.buildUpdate = function(model, where, data, options) {
+  var stmt = this.invokeSuper('buildUpdate', model, where, data, options);
+  stmt.merge(';SELECT @@ROWCOUNT as count', '');
+  return stmt;
+};
+
+// Convert to ISO8601 format YYYY-MM-DDThh:mm:ss[.mmm]
+function dateToMsSql(val) {
+
+  var dateStr = val.getUTCFullYear() + '-'
+    + fillZeros(val.getUTCMonth() + 1) + '-'
+    + fillZeros(val.getUTCDate())
+    + 'T' + fillZeros(val.getUTCHours()) + ':' +
+    fillZeros(val.getUTCMinutes()) + ':' +
+    fillZeros(val.getUTCSeconds()) + '.';
+
+  var ms = val.getUTCMilliseconds();
+  if (ms < 10) {
+    ms = '00' + ms;
+  } else if (ms < 100) {
+    ms = '0' + ms;
+  } else {
+    ms = '' + ms;
+  }
+  return dateStr + ms;
+
+  function fillZeros(v) {
+    return v < 10 ? '0' + v : v;
+  }
+}
+
+function escape(val) {
+  if (val === undefined || val === null) {
+    return 'NULL';
+  }
+
+  switch (typeof val) {
+    case 'boolean':
+      return (val) ? 1 : 0;
+    case 'number':
+      return val + '';
+  }
+
+  if (typeof val === 'object') {
+    val = (typeof val.toISOString === 'function')
+      ? val.toISOString()
+      : val.toString();
+  }
+
+  val = val.replace(/[\0\n\r\b\t\\\'\"\x1a]/g, function(s) {
+    switch (s) {
+      case "\0":
+        return "\\0";
+      case "\n":
+        return "\\n";
+      case "\r":
+        return "\\r";
+      case "\b":
+        return "\\b";
+      case "\t":
+        return "\\t";
+      case "\x1a":
+        return "\\Z";
+      case "\'":
+        return "''"; // For sql server, double quote
+      case "\"":
+        return s; // For oracle
+      default:
+        return "\\" + s;
+    }
+  });
+  // return "q'#"+val+"#'";
+  return "N'" + val + "'";
+}
+
+MsSQL.prototype.toColumnValue = function(prop, val) {
+  if (val == null) {
+    return null;
+  }
+  if (prop.type === String) {
+    return String(val);
+  }
+  if (prop.type === Number) {
+    if (isNaN(val)) {
+      // Map NaN to NULL
+      return val;
+    }
+    return val;
+  }
+
+  if (prop.type === Date || prop.type.name === 'Timestamp') {
+    if (!val.toUTCString) {
+      val = new Date(val);
+    }
+    val = dateToMsSql(val);
+    return val;
+  }
+
+  if (prop.type === Boolean) {
+    if (val) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  return this.serializeObject(val);
+}
+
+MsSQL.prototype.fromColumnValue = function(prop, val) {
+  if (val == null) {
+    return val;
+  }
+  var type = prop && prop.type;
+  if (type === Boolean) {
+    val = !!val; //convert to a boolean type from number
+  }
+  if (type === Date) {
+    if (!(val instanceof Date)) {
+      val = new Date(val.toString());
+    }
+  }
+  return val;
+};
+
+MsSQL.prototype.escapeName = function(name) {
+  return '[' + name.replace(/\./g, '_') + ']';
+};
+
+MsSQL.prototype.getDefaultSchemaName = function() {
+  return 'dbo';
+};
+
+MsSQL.prototype.tableEscaped = function(model) {
+  return this.escapeName(this.schema(model)) + '.' +
+    this.escapeName(this.table(model));
+};
+
+function buildLimit(limit, offset) {
+  if (isNaN(offset)) {
+    offset = 0;
+  }
+  var sql = 'OFFSET ' + offset + ' ROWS';
+  if (limit >= 0) {
+    sql += ' FETCH NEXT ' + limit + ' ROWS ONLY';
+  }
+  return sql;
+}
+
+MsSQL.prototype.buildColumnNames = function(model, filter, options) {
+  var columnNames = this.invokeSuper('buildColumnNames', model, filter);
+  if (filter.limit || filter.offset || filter.skip) {
+    var orderBy = this.buildOrderBy(model, filter.order);
+    var orderClause = '';
+    var partitionByClause = '';
+    if(options && options.partitionBy) {
+      partitionByClause = 'PARTITION BY ' + this.columnEscaped(model, options.partitionBy);
+    }
+    if (orderBy) {
+      orderClause = 'OVER (' + partitionByClause + ' ' + orderBy + ') ';
+    } else {
+      orderClause = 'OVER (' + partitionByClause + ' ' + 'ORDER BY (SELECT 1)) ';
+    }
+    columnNames += ',ROW_NUMBER() ' + orderClause + 'AS RowNum';
+  }
+  return columnNames;
+};
+
+MsSQL.prototype.buildSelect = function(model, filter, options) {
+  if (!filter.order) {
+    var idNames = this.idNames(model);
+    if (idNames && idNames.length) {
+      filter.order = idNames;
+    }
+  }
+
+  var selectStmt = new ParameterizedSQL('SELECT ' +
+    this.buildColumnNames(model, filter, options) +
+    ' FROM ' + this.tableEscaped(model)
+  );
+
+  if (filter) {
+
+    if (filter.where) {
+      var whereStmt = this.buildWhere(model, filter.where);
+      selectStmt.merge(whereStmt);
+    }
+
+    if (filter.limit || filter.skip || filter.offset) {
+      selectStmt = this.applyPagination(
+        model, selectStmt, filter);
+    } else {
+      if (filter.order) {
+        selectStmt.merge(this.buildOrderBy(model, filter.order));
+      }
+    }
+
+  }
+  return this.parameterize(selectStmt);
+};
+
+MsSQL.prototype.applyPagination =
+  function(model, stmt, filter) {
+    var offset = filter.offset || filter.skip || 0;
+    if (this.settings.supportsOffsetFetch) {
+      // SQL 2012 or later
+      // http://technet.microsoft.com/en-us/library/gg699618.aspx
+      var limitClause = buildLimit(filter.limit, filter.offset || filter.skip);
+      return stmt.merge(limitClause);
+    } else {
+      // SQL 2005/2008
+      // http://blog.sqlauthority.com/2013/04/14/sql-server-tricks-for-row-offset-and-paging-in-various-versions-of-sql-server/
+      var paginatedSQL = 'SELECT * FROM (' + stmt.sql + MsSQL.newline +
+        ') AS S' + MsSQL.newline + ' WHERE S.RowNum > ' + offset;
+
+      if (filter.limit !== -1) {
+        paginatedSQL += ' AND S.RowNum <= ' + (offset + filter.limit);
+      }
+
+      stmt.sql = paginatedSQL + MsSQL.newline;
+      return stmt;
+    }
+  };
+
+MsSQL.prototype.buildExpression = function(columnName, operator, operatorValue,
+    propertyDefinition) {
+  switch (operator) {
+    case 'like':
+      return new ParameterizedSQL(columnName + " LIKE ? ESCAPE '\\'",
+          [operatorValue]);
+    case 'nlike':
+      return new ParameterizedSQL(columnName + " NOT LIKE ? ESCAPE '\\'",
+          [operatorValue]);
+    case 'regexp':
+      console.warn('Microsoft SQL Server doe not support the regular ' +
+          'expression operator');
+    default:
+      // invoke the base implementation of `buildExpression`
+      return this.invokeSuper('buildExpression', columnName, operator,
+          operatorValue, propertyDefinition);
+  }
+};
+
+MsSQL.prototype.ping = function(cb) {
+  this.execute('SELECT 1 AS result', cb);
+};
+
+require('./discovery')(MsSQL, mssql);
+require('./migration')(MsSQL, mssql);
+require('./transaction')(MsSQL, mssql);
+
+}).call(this,require('_process'))
+},{"./discovery":480,"./migration":481,"./transaction":483,"_process":279,"debug":417,"loopback-connector":514,"mssql":484,"util":396}],483:[function(require,module,exports){
+var debug = require('debug')('loopback:connector:mssql:transaction');
+
+module.exports = mixinTransaction;
+
+/*!
+ * @param {MsSQL} MsSQL connector class
+ */
+function mixinTransaction(MsSQL, mssql) {
+
+  /**
+   * Begin a new transaction
+   * @param isolationLevel
+   * @param cb
+   */
+  MsSQL.prototype.beginTransaction = function(isolationLevel, cb) {
+    debug('Begin a transaction with isolation level: %s', isolationLevel);
+    isolationLevel = mssql.ISOLATION_LEVEL[isolationLevel.replace(' ', '_')];
+    var transaction = new mssql.Transaction(this.client);
+    transaction.begin(isolationLevel, function(err) {
+      cb(err, transaction);
+    });
+  };
+
+  /**
+   *
+   * @param connection
+   * @param cb
+   */
+  MsSQL.prototype.commit = function(connection, cb) {
+    debug('Commit a transaction');
+    connection.commit(cb);
+  };
+
+  /**
+   *
+   * @param connection
+   * @param cb
+   */
+  MsSQL.prototype.rollback = function(connection, cb) {
+    debug('Rollback a transaction');
+    connection.rollback(cb);
+  };
+}
+
+},{"debug":417}],484:[function(require,module,exports){
+module.exports = require("./lib/main")
+},{"./lib/main":488}],485:[function(require,module,exports){
+// Generated by CoffeeScript 1.10.0
+(function() {
+  var IGNORE_KEYS, parseConnectionString, parseConnectionURI, qs, resolveConnectionString, url,
+    indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
+
+  url = require('url');
+
+  qs = require('querystring');
+
+  IGNORE_KEYS = ['stream'];
+
+  parseConnectionURI = function(uri) {
+    var instance, key, object, parsed, password, path, ref, user, value;
+    parsed = url.parse(uri);
+    path = parsed.pathname.substr(1).split('/');
+    if (path.length > 1) {
+      instance = path.shift();
+    }
+    if (parsed.auth) {
+      parsed.auth = parsed.auth.split(':');
+      user = parsed.auth.shift();
+      password = parsed.auth.join(':');
+    }
+    object = {
+      server: "" + parsed.hostname + (parsed.port ? "," + parsed.port : instance ? "\\" + instance : ""),
+      uid: user || '',
+      pwd: password || '',
+      database: path[0]
+    };
+    if (parsed.query) {
+      ref = qs.parse(parsed.query);
+      for (key in ref) {
+        value = ref[key];
+        if (key === 'domain') {
+          object.uid = value + "\\" + object.uid;
+        } else {
+          object[key] = value;
+        }
+      }
+    }
+    Object.defineProperty(object, 'toString', {
+      value: function() {
+        return ((function() {
+          var results;
+          results = [];
+          for (key in this) {
+            value = this[key];
+            if (indexOf.call(IGNORE_KEYS, key) < 0) {
+              results.push(key + "={" + value + "}");
+            }
+          }
+          return results;
+        }).call(this)).join(';');
+      }
+    });
+    return object;
+  };
+
+  parseConnectionString = function(string) {
+    var buffer, char, cursor, original, param, parsed, parsing, quotes;
+    cursor = 0;
+    parsing = 'name';
+    param = null;
+    buffer = '';
+    quotes = null;
+    parsed = {};
+    original = {};
+    Object.defineProperty(parsed, '__original__', {
+      value: original
+    });
+    Object.defineProperty(parsed, 'toString', {
+      value: function() {
+        var key, value;
+        return ((function() {
+          var ref, ref1, ref2, ref3, results;
+          results = [];
+          for (key in this) {
+            value = this[key];
+            if (indexOf.call(IGNORE_KEYS, key) < 0) {
+              results.push(original[key].name + "=" + ((ref = (ref1 = original[key].escape) != null ? ref1[0] : void 0) != null ? ref : '') + value + ((ref2 = (ref3 = original[key].escape) != null ? ref3[1] : void 0) != null ? ref2 : ''));
+            }
+          }
+          return results;
+        }).call(this)).join(';');
+      }
+    });
+    while (cursor < string.length) {
+      char = string.charAt(cursor);
+      switch (char) {
+        case '=':
+          if (parsing === 'name') {
+            buffer = buffer.trim();
+            param = buffer.toLowerCase();
+            original[param] = {
+              name: buffer
+            };
+            parsing = 'value';
+            buffer = '';
+          } else {
+            buffer += char;
+          }
+          break;
+        case '\'':
+        case '"':
+          if (parsing === 'value') {
+            if (!buffer.trim().length) {
+              original[param].escape = [char, char];
+              quotes = char;
+              buffer = '';
+            } else {
+              if (quotes) {
+                if (char === quotes) {
+                  if (char === string.charAt(cursor + 1)) {
+                    buffer += char;
+                    cursor++;
+                  } else {
+                    parsed[param] = buffer;
+                    param = null;
+                    parsing = null;
+                    buffer = '';
+                    quotes = null;
+                  }
+                } else {
+                  buffer += char;
+                }
+              } else {
+                buffer += char;
+              }
+            }
+          } else {
+            throw new Error("Invalid connection string.");
+          }
+          break;
+        case '{':
+          if (parsing === 'value') {
+            if (!buffer.trim().length) {
+              original[param].escape = ['{', '}'];
+              quotes = '{}';
+              buffer = '';
+            } else {
+              buffer += char;
+            }
+          } else {
+            throw new Error("Invalid connection string.");
+          }
+          break;
+        case '}':
+          if (parsing === 'value') {
+            if (quotes === '{}') {
+              parsed[param] = buffer;
+              param = null;
+              parsing = null;
+              buffer = '';
+              quotes = null;
+            } else {
+              buffer += char;
+            }
+          } else {
+            throw new Error("Invalid connection string.");
+          }
+          break;
+        case ';':
+          if (parsing === 'value') {
+            if (quotes) {
+              buffer += char;
+            } else {
+              parsed[param] = buffer;
+              param = null;
+              parsing = 'name';
+              buffer = '';
+            }
+          } else {
+            buffer = '';
+            parsing = 'name';
+          }
+          break;
+        default:
+          buffer += char;
+      }
+      cursor++;
+    }
+    if (parsing === 'value') {
+      parsed[param] = buffer;
+    }
+    return parsed;
+  };
+
+  resolveConnectionString = function(string) {
+    var config, parsed, ref, ref1, ref10, ref11, ref12, ref13, ref14, ref2, ref3, ref4, ref5, ref6, ref7, ref8, ref9, server, user;
+    if (/^(mssql|tedious|msnodesql|tds)\:\/\//i.test(string)) {
+      parsed = parseConnectionURI(string);
+    } else {
+      parsed = parseConnectionString(string);
+    }
+    if (parsed.driver === 'msnodesql') {
+      parsed.driver = 'SQL Server Native Client 11.0';
+      if ((ref = parsed.__original__) != null) {
+        ref.driver = {
+          name: 'Driver',
+          escape: ['{', '}']
+        };
+      }
+      return {
+        driver: 'msnodesql',
+        connectionString: parsed.toString()
+      };
+    }
+    user = (ref1 = parsed.uid) != null ? ref1 : parsed['user id'];
+    server = (ref2 = (ref3 = (ref4 = (ref5 = parsed.server) != null ? ref5 : parsed.address) != null ? ref4 : parsed.addr) != null ? ref3 : parsed['data source']) != null ? ref2 : parsed['network address'];
+    config = {
+      driver: parsed.driver,
+      password: (ref6 = parsed.pwd) != null ? ref6 : parsed.password,
+      database: (ref7 = parsed.database) != null ? ref7 : parsed['initial catalog'],
+      connectionTimeout: (ref8 = (ref9 = parsed.timeout) != null ? ref9 : parsed['connect timeout']) != null ? ref8 : parsed['connection timeout'],
+      requestTimeout: parsed['request timeout'],
+      stream: (ref10 = (ref11 = parsed.stream) != null ? ref11.toLowerCase() : void 0) === 'true' || ref10 === 'yes' || ref10 === '1',
+      options: {
+        encrypt: (ref12 = (ref13 = parsed.encrypt) != null ? ref13.toLowerCase() : void 0) === 'true' || ref12 === 'yes' || ref12 === '1'
+      }
+    };
+    if (/^(.*)\\(.*)$/.exec(user)) {
+      config.domain = RegExp.$1;
+      user = RegExp.$2;
+    }
+    if (server) {
+      server = server.trim();
+      if (/^np\:/i.test(server)) {
+        throw new Error("Connection via Named Pipes is not supported.");
+      }
+      if (/^tcp\:/i.test(server)) {
+        server = server.substr(4);
+      }
+      if (/^(.*)\\(.*)$/.exec(server)) {
+        server = RegExp.$1;
+        config.options.instanceName = RegExp.$2;
+      }
+      if (/^(.*),(.*)$/.exec(server)) {
+        server = RegExp.$1.trim();
+        config.port = parseInt(RegExp.$2.trim());
+      }
+      if ((ref14 = server.toLowerCase()) === '.' || ref14 === '(.)' || ref14 === '(localdb)' || ref14 === '(local)') {
+        server = 'localhost';
+      }
+    }
+    config.user = user;
+    config.server = server;
+    return config;
+  };
+
+  module.exports = {
+    parse: parseConnectionString,
+    resolve: resolveConnectionString
+  };
+
+}).call(this);
+
+},{"querystring":293,"url":392}],486:[function(require,module,exports){
+(function (Buffer){
+// Generated by CoffeeScript 1.10.0
+(function() {
+  var TYPES, fn, key, value, zero;
+
+  TYPES = {
+    VarChar: function(length) {
+      return {
+        type: TYPES.VarChar,
+        length: length
+      };
+    },
+    NVarChar: function(length) {
+      return {
+        type: TYPES.NVarChar,
+        length: length
+      };
+    },
+    Text: function() {
+      return {
+        type: TYPES.Text
+      };
+    },
+    Int: function() {
+      return {
+        type: TYPES.Int
+      };
+    },
+    BigInt: function() {
+      return {
+        type: TYPES.BigInt
+      };
+    },
+    TinyInt: function() {
+      return {
+        type: TYPES.TinyInt
+      };
+    },
+    SmallInt: function() {
+      return {
+        type: TYPES.SmallInt
+      };
+    },
+    Bit: function() {
+      return {
+        type: TYPES.Bit
+      };
+    },
+    Float: function() {
+      return {
+        type: TYPES.Float
+      };
+    },
+    Numeric: function(precision, scale) {
+      return {
+        type: TYPES.Numeric,
+        precision: precision,
+        scale: scale
+      };
+    },
+    Decimal: function(precision, scale) {
+      return {
+        type: TYPES.Decimal,
+        precision: precision,
+        scale: scale
+      };
+    },
+    Real: function() {
+      return {
+        type: TYPES.Real
+      };
+    },
+    Date: function() {
+      return {
+        type: TYPES.Date
+      };
+    },
+    DateTime: function() {
+      return {
+        type: TYPES.DateTime
+      };
+    },
+    DateTime2: function(scale) {
+      return {
+        type: TYPES.DateTime2,
+        scale: scale
+      };
+    },
+    DateTimeOffset: function(scale) {
+      return {
+        type: TYPES.DateTimeOffset,
+        scale: scale
+      };
+    },
+    SmallDateTime: function() {
+      return {
+        type: TYPES.SmallDateTime
+      };
+    },
+    Time: function(scale) {
+      return {
+        type: TYPES.Time,
+        scale: scale
+      };
+    },
+    UniqueIdentifier: function() {
+      return {
+        type: TYPES.UniqueIdentifier
+      };
+    },
+    SmallMoney: function() {
+      return {
+        type: TYPES.SmallMoney
+      };
+    },
+    Money: function() {
+      return {
+        type: TYPES.Money
+      };
+    },
+    Binary: function(length) {
+      return {
+        type: TYPES.Binary,
+        length: length
+      };
+    },
+    VarBinary: function(length) {
+      return {
+        type: TYPES.VarBinary,
+        length: length
+      };
+    },
+    Image: function() {
+      return {
+        type: TYPES.Image
+      };
+    },
+    Xml: function() {
+      return {
+        type: TYPES.Xml
+      };
+    },
+    Char: function(length) {
+      return {
+        type: TYPES.Char,
+        length: length
+      };
+    },
+    NChar: function(length) {
+      return {
+        type: TYPES.NChar,
+        length: length
+      };
+    },
+    NText: function() {
+      return {
+        type: TYPES.NText
+      };
+    },
+    TVP: function(tvpType) {
+      return {
+        type: TYPES.TVP,
+        tvpType: tvpType
+      };
+    },
+    UDT: function() {
+      return {
+        type: TYPES.UDT
+      };
+    },
+    Geography: function() {
+      return {
+        type: TYPES.Geography
+      };
+    },
+    Geometry: function() {
+      return {
+        type: TYPES.Geometry
+      };
+    }
+  };
+
+  module.exports.TYPES = TYPES;
+
+  module.exports.DECLARATIONS = {};
+
+  fn = function(key, value) {
+    return value.inspect = function() {
+      return "[sql." + key + "]";
+    };
+  };
+  for (key in TYPES) {
+    value = TYPES[key];
+    value.declaration = key.toLowerCase();
+    module.exports.DECLARATIONS[value.declaration] = value;
+    fn(key, value);
+  }
+
+  module.exports.declare = function(type, options) {
+    var ref, ref1, ref2, ref3, ref4, ref5;
+    switch (type) {
+      case TYPES.VarChar:
+      case TYPES.NVarChar:
+      case TYPES.VarBinary:
+        return type.declaration + " (" + (options.length > 8000 ? 'MAX' : (ref = options.length) != null ? ref : 'MAX') + ")";
+      case TYPES.NVarChar:
+        return type.declaration + " (" + (options.length > 4000 ? 'MAX' : (ref1 = options.length) != null ? ref1 : 'MAX') + ")";
+      case TYPES.Char:
+      case TYPES.NChar:
+      case TYPES.Binary:
+        return type.declaration + " (" + ((ref2 = options.length) != null ? ref2 : 1) + ")";
+      case TYPES.Decimal:
+      case TYPES.Numeric:
+        return type.declaration + " (" + ((ref3 = options.precision) != null ? ref3 : 18) + ", " + ((ref4 = options.scale) != null ? ref4 : 0) + ")";
+      case TYPES.Time:
+      case TYPES.DateTime2:
+      case TYPES.DateTimeOffset:
+        return type.declaration + " (" + ((ref5 = options.scale) != null ? ref5 : 7) + ")";
+      case TYPES.TVP:
+        return options.tvpType + " readonly";
+      default:
+        return type.declaration;
+    }
+  };
+
+  module.exports.cast = function(value, type, options) {
+    var ns, ref, scale;
+    if (value == null) {
+      return null;
+    }
+    switch (typeof value) {
+      case 'string':
+        return "N'" + (value.replace(/'/g, '\'\'')) + "'";
+      case 'number':
+        return value;
+      case 'boolean':
+        if (value) {
+          return 1;
+        } else {
+          return 0;
+        }
+      case 'object':
+        if (value instanceof Date) {
+          ns = value.getUTCMilliseconds() / 1000;
+          if (value.nanosecondDelta != null) {
+            ns += value.nanosecondDelta;
+          }
+          scale = (ref = options.scale) != null ? ref : 7;
+          if (scale > 0) {
+            ns = String(ns).substr(1, scale + 1);
+          } else {
+            ns = "";
+          }
+          return "N'" + (value.getUTCFullYear()) + "-" + (zero(value.getUTCMonth() + 1)) + "-" + (zero(value.getUTCDate())) + " " + (zero(value.getUTCHours())) + ":" + (zero(value.getUTCMinutes())) + ":" + (zero(value.getUTCSeconds())) + ns + "'";
+        } else if (Buffer.isBuffer(value)) {
+          return "0x" + (value.toString('hex'));
+        } else {
+          return null;
+        }
+        break;
+      default:
+        return null;
+    }
+  };
+
+  zero = function(value, length) {
+    var i, j, ref;
+    if (length == null) {
+      length = 2;
+    }
+    value = String(value);
+    if (value.length < length) {
+      for (i = j = 1, ref = length - value.length; 1 <= ref ? j <= ref : j >= ref; i = 1 <= ref ? ++j : --j) {
+        value = "0" + value;
+      }
+    }
+    return value;
+  };
+
+}).call(this);
+
+}).call(this,{"isBuffer":require("../../../../../client/node_modules/is-buffer/index.js")})
+},{"../../../../../client/node_modules/is-buffer/index.js":155}],487:[function(require,module,exports){
+// Generated by CoffeeScript 1.10.0
+(function() {
+  module.exports = {
+    READ_UNCOMMITTED: 0x01,
+    READ_COMMITTED: 0x02,
+    REPEATABLE_READ: 0x03,
+    SERIALIZABLE: 0x04,
+    SNAPSHOT: 0x05
+  };
+
+}).call(this);
+
+},{}],488:[function(require,module,exports){
+(function (process,global,Buffer){
+// Generated by CoffeeScript 1.10.0
+(function() {
+  var Connection, ConnectionError, ConnectionString, DRIVERS, EventEmitter, ISOLATION_LEVEL, PreparedStatement, PreparedStatementError, Request, RequestError, TYPES, Table, Transaction, TransactionError, declare, fs, getTypeByValue, global_connection, key, map, ref, ref1, util, value,
+    extend = function(child, parent) { for (var key in parent) { if (hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
+    hasProp = {}.hasOwnProperty,
+    indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
+    bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; };
+
+  EventEmitter = require('events').EventEmitter;
+
+  util = require('util');
+
+  fs = require('fs');
+
+  ref = require('./datatypes'), TYPES = ref.TYPES, declare = ref.declare;
+
+  ISOLATION_LEVEL = require('./isolationlevel');
+
+  DRIVERS = ['msnodesql', 'tedious', 'tds', 'msnodesqlv8'];
+
+  Table = require('./table');
+
+  ConnectionString = require('./connectionstring');
+
+  global_connection = null;
+
+  map = [];
+
+
+  /*
+  Register you own type map.
+  
+  **Example:**
+  ```
+  sql.map.register(MyClass, sql.Text);
+  ```
+  You can also overwrite default type map.
+  ```
+  sql.map.register(Number, sql.BigInt);
+  ```
+  
+  @path module.exports.map
+  @param {*} jstype JS data type.
+  @param {*} sqltype SQL data type.
+   */
+
+  map.register = function(jstype, sqltype) {
+    var i, index, item, len;
+    for (index = i = 0, len = this.length; i < len; index = ++i) {
+      item = this[index];
+      if (!(item.js === jstype)) {
+        continue;
+      }
+      this.splice(index, 1);
+      break;
+    }
+    this.push({
+      js: jstype,
+      sql: sqltype
+    });
+    return null;
+  };
+
+  map.register(String, TYPES.NVarChar);
+
+  map.register(Number, TYPES.Int);
+
+  map.register(Boolean, TYPES.Bit);
+
+  map.register(Date, TYPES.DateTime);
+
+  map.register(Buffer, TYPES.VarBinary);
+
+  map.register(Table, TYPES.TVP);
+
+
+  /*
+  @ignore
+   */
+
+  getTypeByValue = function(value) {
+    var i, item, j, k, l, len, len1, len2, len3;
+    if (value === null || value === void 0) {
+      return TYPES.NVarChar;
+    }
+    switch (typeof value) {
+      case 'string':
+        for (i = 0, len = map.length; i < len; i++) {
+          item = map[i];
+          if (item.js === String) {
+            return item.sql;
+          }
+        }
+        return TYPES.NVarChar;
+      case 'number':
+        for (j = 0, len1 = map.length; j < len1; j++) {
+          item = map[j];
+          if (item.js === Number) {
+            return item.sql;
+          }
+        }
+        return TYPES.Int;
+      case 'boolean':
+        for (k = 0, len2 = map.length; k < len2; k++) {
+          item = map[k];
+          if (item.js === Boolean) {
+            return item.sql;
+          }
+        }
+        return TYPES.Bit;
+      case 'object':
+        for (l = 0, len3 = map.length; l < len3; l++) {
+          item = map[l];
+          if (value instanceof item.js) {
+            return item.sql;
+          }
+        }
+        return TYPES.NVarChar;
+      default:
+        return TYPES.NVarChar;
+    }
+  };
+
+
+  /*
+  Class Connection.
+  
+  Internally, each `Connection` instance is a separate pool of TDS connections. Once you create a new `Request`/`Transaction`/`Prepared Statement`, a new TDS connection is acquired from the pool and reserved for desired action. Once the action is complete, connection is released back to the pool.
+  
+  @property {Boolean} connected If true, connection is established.
+  @property {Boolean} connecting If true, connection is being established.
+  @property {*} driver Reference to configured Driver.
+  
+  @event connect Dispatched after connection has established.
+  @event close Dispatched after connection has closed a pool (by calling close).
+   */
+
+  Connection = (function(superClass) {
+    extend(Connection, superClass);
+
+    Connection.prototype.connected = false;
+
+    Connection.prototype.connecting = false;
+
+    Connection.prototype.driver = null;
+
+
+    /*
+    	Create new Connection.
+    	
+    	@param {Object|String} config Connection configuration object or connection string.
+    	@callback [callback] A callback which is called after connection has established, or an error has occurred.
+    		@param {Error} err Error on error, otherwise null.
+     */
+
+    function Connection(config1, callback) {
+      var base, base1, base2, base3, base4, err, error, ex, ref1;
+      this.config = config1;
+      if ('string' === typeof this.config) {
+        try {
+          this.config = ConnectionString.resolve(this.config);
+        } catch (error) {
+          ex = error;
+          if (callback) {
+            return callback(ex);
+          } else {
+            throw ex;
+          }
+        }
+      }
+      if ((base = this.config).driver == null) {
+        base.driver = 'tedious';
+      }
+      if ((base1 = this.config).port == null) {
+        base1.port = 1433;
+      }
+      if ((base2 = this.config).options == null) {
+        base2.options = {};
+      }
+      if ((base3 = this.config).stream == null) {
+        base3.stream = false;
+      }
+      if ((base4 = this.config).parseJSON == null) {
+        base4.parseJSON = false;
+      }
+      if (/^(.*)\\(.*)$/.exec(this.config.server)) {
+        this.config.server = RegExp.$1;
+        this.config.options.instanceName = RegExp.$2;
+      }
+      if (ref1 = this.config.driver, indexOf.call(DRIVERS, ref1) >= 0) {
+        this.driver = this.initializeDriver(require("./" + this.config.driver));
+        if (module.exports.fix) {
+          this.driver.fix();
+        }
+      } else {
+        err = new ConnectionError("Unknown driver " + this.config.driver + "!", 'EDRIVER');
+        if (callback) {
+          return callback(err);
+        } else {
+          throw err;
+        }
+      }
+      if (callback) {
+        this.connect(callback);
+      }
+    }
+
+
+    /*
+    	Write message to debug stream.
+     */
+
+    Connection.prototype._debug = function(msg) {
+      var ref1;
+      return (ref1 = this._debugStream) != null ? ref1.write((String(msg).replace(/\x1B\[[0-9;]*m/g, '')) + "\n") : void 0;
+    };
+
+
+    /*
+    	Initializes driver for this connection. Separated from constructor and used by co-mssql.
+    	
+    	@private
+    	@param {Function} driver Loaded driver.
+    	
+    	@returns {Connection}
+     */
+
+    Connection.prototype.initializeDriver = function(driver) {
+      return driver(Connection, Transaction, Request, ConnectionError, TransactionError, RequestError);
+    };
+
+
+    /*
+    	Creates a new connection pool with one active connection. This one initial connection serves as a probe to find out whether the configuration is valid.
+    	
+    	@callback [callback] A callback which is called after connection has established, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    	
+    	@returns {Connection|Promise}
+     */
+
+    Connection.prototype.connect = function(callback) {
+      if (callback != null) {
+        return this._connect(callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._connect(function(err) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve(_this);
+          });
+        };
+      })(this));
+    };
+
+    Connection.prototype._connect = function(callback) {
+      var go;
+      if (!this.driver) {
+        return callback(new ConnectionError("Connection was closed. Create a new instance."));
+      }
+      if (this.connected) {
+        return callback(new ConnectionError("Database is already connected! Call close before connecting to different database.", 'EALREADYCONNECTED'));
+      }
+      if (this.connecting) {
+        return callback(new ConnectionError("Already connecting to database! Call close before connecting to different database.", 'EALREADYCONNECTING'));
+      }
+      go = (function(_this) {
+        return function() {
+          _this.connecting = true;
+          return _this.driver.Connection.prototype.connect.call(_this, _this.config, function(err) {
+            if (!_this.connecting) {
+              return;
+            }
+            _this.connecting = false;
+            if (err) {
+              if (_this._debugStream) {
+                _this._debugStream.removeAllListeners();
+                _this._debugStream.end();
+                _this._debugStream = null;
+              }
+            } else {
+              _this.connected = true;
+              _this.emit('connect');
+            }
+            return callback(err);
+          });
+        };
+      })(this);
+      if (this.config.debug) {
+        this._debugStream = fs.createWriteStream("./mssql_debug_" + (Date.now()) + ".log");
+        this._debugStream.once('open', go);
+        this._debugStream.on('error', function(err) {
+          if (this.connecting || this.connected) {
+            return console.error(err.stack);
+          } else {
+            this._debugStream.removeListener('open', go);
+            return callback(new ConnectionError("Failed to open debug stream. " + err.message, 'EDEBUG'));
+          }
+        });
+      } else {
+        go();
+      }
+      return this;
+    };
+
+
+    /*
+    	Close all active connections in the pool.
+    	
+    	@callback [callback] A callback which is called after connection has closed, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    	
+    	@returns {Connection|Promise}
+     */
+
+    Connection.prototype.close = function(callback) {
+      if (callback != null) {
+        return this._close(callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._close(function(err) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve();
+          });
+        };
+      })(this));
+    };
+
+    Connection.prototype._close = function(callback) {
+      if (this._debugStream) {
+        this._debugStream.removeAllListeners();
+        this._debugStream.end();
+        this._debugStream = null;
+      }
+      if (this.connecting) {
+        this.connecting = false;
+        this.driver.Connection.prototype.close.call(this, (function(_this) {
+          return function(err) {
+            return callback(err);
+          };
+        })(this));
+        this.driver = null;
+      } else if (this.connected) {
+        this.connected = false;
+        this.driver.Connection.prototype.close.call(this, (function(_this) {
+          return function(err) {
+            if (!err) {
+              _this.connected = false;
+              _this.emit('close');
+            }
+            return callback(err);
+          };
+        })(this));
+        this.driver = null;
+      }
+      return this;
+    };
+
+
+    /*
+    	Returns new request using this connection.
+    	
+    	@returns {Request}
+     */
+
+    Connection.prototype.request = function() {
+      return new Request(this);
+    };
+
+
+    /*
+    	Returns new transaction using this connection.
+    	
+    	@returns {Transaction}
+     */
+
+    Connection.prototype.transaction = function() {
+      return new Transaction(this);
+    };
+
+    return Connection;
+
+  })(EventEmitter);
+
+
+  /*
+  Class PreparedStatement.
+  
+  IMPORTANT: Rememeber that each prepared statement means one reserved connection from the pool. Don't forget to unprepare a prepared statement!
+  
+  @property {Connection} connection Reference to used connection.
+  @property {Boolean} multiple If `true`, `execute` will handle multiple recordsets.
+  @property {String} statement Prepared SQL statement.
+   */
+
+  PreparedStatement = (function(superClass) {
+    extend(PreparedStatement, superClass);
+
+    PreparedStatement.prototype._pooledConnection = null;
+
+    PreparedStatement.prototype._queue = null;
+
+    PreparedStatement.prototype._working = false;
+
+    PreparedStatement.prototype._handle = 0;
+
+    PreparedStatement.prototype.connection = null;
+
+    PreparedStatement.prototype.transaction = null;
+
+    PreparedStatement.prototype.prepared = false;
+
+    PreparedStatement.prototype.statement = null;
+
+    PreparedStatement.prototype.parameters = null;
+
+    PreparedStatement.prototype.multiple = false;
+
+    PreparedStatement.prototype.stream = null;
+
+
+    /*
+    	Create new Prepared Statement.
+    	
+    	@param {String} statement SQL statement.
+    	@param {Connection} [connection] If ommited, global connection is used instead.
+     */
+
+    function PreparedStatement(connection) {
+      if (connection instanceof Transaction) {
+        this.transaction = connection;
+        this.connection = connection.connection;
+      } else if (connection instanceof Connection) {
+        this.connection = connection;
+      } else {
+        this.connection = global_connection;
+      }
+      this._queue = [];
+      this.parameters = {};
+    }
+
+
+    /*
+    	Add an input parameter to the prepared statement.
+    	
+    	**Example:**
+    	```
+    	statement.input('input_parameter', sql.Int);
+    	statement.input('input_parameter', sql.VarChar(50));
+    	```
+    	
+    	@param {String} name Name of the input parameter without @ char.
+    	@param {*} type SQL data type of input parameter.
+    	@returns {PreparedStatement}
+     */
+
+    PreparedStatement.prototype.input = function(name, type) {
+      if (/(--| |\/\*|\*\/|')/.test(name)) {
+        throw new PreparedStatementError("SQL injection warning for param '" + name + "'", 'EINJECT');
+      }
+      if (arguments.length < 2) {
+        throw new PreparedStatementError("Invalid number of arguments. 2 arguments expected.", 'EARGS');
+      }
+      if (type instanceof Function) {
+        type = type();
+      }
+      this.parameters[name] = {
+        name: name,
+        type: type.type,
+        io: 1,
+        length: type.length,
+        scale: type.scale,
+        precision: type.precision,
+        tvpType: type.tvpType
+      };
+      return this;
+    };
+
+
+    /*
+    	Add an output parameter to the prepared statement.
+    	
+    	**Example:**
+    	```
+    	statement.output('output_parameter', sql.Int);
+    	statement.output('output_parameter', sql.VarChar(50));
+    	```
+    	
+    	@param {String} name Name of the output parameter without @ char.
+    	@param {*} type SQL data type of output parameter.
+    	@returns {PreparedStatement}
+     */
+
+    PreparedStatement.prototype.output = function(name, type) {
+      if (/(--| |\/\*|\*\/|')/.test(name)) {
+        throw new PreparedStatementError("SQL injection warning for param '" + name + "'", 'EINJECT');
+      }
+      if (arguments.length < 2) {
+        throw new PreparedStatementError("Invalid number of arguments. 2 arguments expected.", 'EARGS');
+      }
+      if (type instanceof Function) {
+        type = type();
+      }
+      this.parameters[name] = {
+        name: name,
+        type: type.type,
+        io: 2,
+        length: type.length,
+        scale: type.scale,
+        precision: type.precision
+      };
+      return this;
+    };
+
+
+    /*
+    	Prepare a statement.
+    	
+    	@property {String} [statement] SQL statement to prepare.
+    	@callback [callback] A callback which is called after preparation has completed, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    	@returns {PreparedStatement|Promise}
+     */
+
+    PreparedStatement.prototype.prepare = function(statement, callback) {
+      if (callback != null) {
+        return this._prepare(statement, callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._prepare(statement, function(err) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve(_this);
+          });
+        };
+      })(this));
+    };
+
+    PreparedStatement.prototype._prepare = function(statement, callback) {
+      var done;
+      if (this._pooledConnection) {
+        callback(new PreparedStatementError("Statement is already prepared.", 'EALREADYPREPARED'));
+        return this;
+      }
+      if (typeof statement === 'function') {
+        callback = statement;
+        statement = void 0;
+      }
+      if (statement != null) {
+        this.statement = statement;
+      }
+      done = (function(_this) {
+        return function(err, connection) {
+          var name, param, req;
+          if (err) {
+            return callback(err);
+          }
+          _this._pooledConnection = connection;
+          req = new Request(_this);
+          req.stream = false;
+          req.output('handle', TYPES.Int);
+          req.input('params', TYPES.NVarChar, ((function() {
+            var ref1, results;
+            ref1 = this.parameters;
+            results = [];
+            for (name in ref1) {
+              param = ref1[name];
+              results.push("@" + name + " " + (declare(param.type, param)) + (param.io === 2 ? " output" : ""));
+            }
+            return results;
+          }).call(_this)).join(','));
+          req.input('stmt', TYPES.NVarChar, _this.statement);
+          return req.execute('sp_prepare', function(err) {
+            if (err) {
+              if (_this.transaction) {
+                _this.transaction.next();
+              } else {
+                _this.connection.pool.release(_this._pooledConnection);
+                _this._pooledConnection = null;
+              }
+              return callback(err);
+            }
+            _this._handle = req.parameters.handle.value;
+            return callback(null);
+          });
+        };
+      })(this);
+      if (this.transaction) {
+        if (!this.transaction._pooledConnection) {
+          callback(new TransactionError("Transaction has not begun. Call begin() first.", 'ENOTBEGUN'));
+          return this;
+        }
+        this.transaction.queue(done);
+      } else {
+        this.connection.pool.acquire(done);
+      }
+      return this;
+    };
+
+
+    /*
+    	Execute next request in queue.
+    	
+    	@private
+    	@returns {PreparedStatement}
+     */
+
+    PreparedStatement.prototype.next = function() {
+      if (this._queue.length) {
+        process.nextTick((function(_this) {
+          return function() {
+            return _this._queue.shift()(null, _this._pooledConnection);
+          };
+        })(this));
+      } else {
+        this._working = false;
+      }
+      return this;
+    };
+
+
+    /*
+    	Add request to queue for connection. If queue is empty, execute the request immediately.
+    	
+    	@private
+    	@callback callback A callback to call when connection in ready to execute request.
+    		@param {Error} err Error on error, otherwise null.
+    		@param {*} conn Internal driver's connection.
+    	@returns {PreparedStatement}
+     */
+
+    PreparedStatement.prototype.queue = function(callback) {
+      if (!this._pooledConnection) {
+        callback(new PreparedStatementError("Statement is not prepared. Call prepare() first.", 'ENOTPREPARED'));
+        return this;
+      }
+      if (this._working) {
+        this._queue.push(callback);
+      } else {
+        this._working = true;
+        callback(null, this._pooledConnection);
+      }
+      return this;
+    };
+
+
+    /*
+    	Execute a prepared statement.
+    	
+    	@property {String} values An object whose names correspond to the names of parameters that were added to the prepared statement before it was prepared.
+    	@callback [callback] A callback which is called after execution has completed, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    	@returns {Request|Promise}
+     */
+
+    PreparedStatement.prototype.execute = function(values, callback) {
+      if (callback != null) {
+        return this._execute(values, callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._execute(values, function(err, recordset) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve(recordset);
+          });
+        };
+      })(this));
+    };
+
+    PreparedStatement.prototype._execute = function(values, callback) {
+      var name, param, ref1, req;
+      req = new Request(this);
+      if (this.stream != null) {
+        req.stream = this.stream;
+      }
+      req.input('handle', TYPES.Int, this._handle);
+      ref1 = this.parameters;
+      for (name in ref1) {
+        param = ref1[name];
+        req.parameters[name] = {
+          name: name,
+          type: param.type,
+          io: param.io,
+          value: values[name],
+          length: param.length,
+          scale: param.scale,
+          precision: param.precision
+        };
+      }
+      req.execute('sp_execute', (function(_this) {
+        return function(err, recordsets, returnValue) {
+          if (err) {
+            return callback(err);
+          }
+          return callback(null, (_this.multiple ? recordsets : recordsets[0]));
+        };
+      })(this));
+      return req;
+    };
+
+
+    /*
+    	Unprepare a prepared statement.
+    	
+    	@callback [callback] A callback which is called after unpreparation has completed, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    	@returns {PreparedStatement|Promise}
+     */
+
+    PreparedStatement.prototype.unprepare = function(callback) {
+      if (callback != null) {
+        return this._unprepare(callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._unprepare(function(err) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve();
+          });
+        };
+      })(this));
+    };
+
+    PreparedStatement.prototype._unprepare = function(callback) {
+      var done, req;
+      if (!this._pooledConnection) {
+        callback(new PreparedStatementError("Statement is not prepared. Call prepare() first.", 'ENOTPREPARED'));
+        return this;
+      }
+      done = (function(_this) {
+        return function(err) {
+          if (err) {
+            return callback(err);
+          }
+          if (_this.transaction) {
+            _this.transaction.next();
+          } else {
+            _this.connection.pool.release(_this._pooledConnection);
+            _this._pooledConnection = null;
+          }
+          _this._handle = 0;
+          return callback(null);
+        };
+      })(this);
+      req = new Request(this);
+      req.stream = false;
+      req.input('handle', TYPES.Int, this._handle);
+      req.execute('sp_unprepare', done);
+      return this;
+    };
+
+    return PreparedStatement;
+
+  })(EventEmitter);
+
+
+  /*
+  Class Transaction.
+  
+  @property {Connection} connection Reference to used connection.
+  @property {Number} isolationLevel Controls the locking and row versioning behavior of TSQL statements issued by a connection. READ_COMMITTED by default.
+  @property {String} name Transaction name. Empty string by default.
+  
+  @event begin Dispatched when transaction begin.
+  @event commit Dispatched on successful commit.
+  @event rollback Dispatched on successful rollback.
+   */
+
+  Transaction = (function(superClass) {
+    extend(Transaction, superClass);
+
+    Transaction.prototype._pooledConnection = null;
+
+    Transaction.prototype._queue = null;
+
+    Transaction.prototype._aborted = false;
+
+    Transaction.prototype._working = false;
+
+    Transaction.prototype.name = "";
+
+    Transaction.prototype.connection = null;
+
+    Transaction.prototype.isolationLevel = ISOLATION_LEVEL.READ_COMMITTED;
+
+
+    /*
+    	Create new Transaction.
+    	
+    	@param {Connection} [connection] If ommited, global connection is used instead.
+     */
+
+    function Transaction(connection) {
+      this._abort = bind(this._abort, this);
+      this.connection = connection != null ? connection : global_connection;
+      this._queue = [];
+    }
+
+
+    /*
+    	@private
+     */
+
+    Transaction.prototype._abort = function() {
+      return this.connection.driver.Transaction.prototype._abort.call(this);
+    };
+
+
+    /*
+    	Begin a transaction.
+    	
+    	@param {Number} [isolationLevel] Controls the locking and row versioning behavior of TSQL statements issued by a connection.
+    	@callback [callback] A callback which is called after transaction has began, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    	@returns {Transaction|Promise}
+     */
+
+    Transaction.prototype.begin = function(isolationLevel, callback) {
+      if (isolationLevel instanceof Function) {
+        callback = isolationLevel;
+        isolationLevel = void 0;
+      }
+      if (callback != null) {
+        return this._begin(isolationLevel, callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._begin(isolationLevel, function(err) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve(_this);
+          });
+        };
+      })(this));
+    };
+
+    Transaction.prototype._begin = function(isolationLevel, callback) {
+      if (isolationLevel != null) {
+        this.isolationLevel = isolationLevel;
+      }
+      if (this._pooledConnection) {
+        callback(new TransactionError("Transaction has already begun.", 'EALREADYBEGUN'));
+        return this;
+      }
+      this.connection.driver.Transaction.prototype.begin.call(this, (function(_this) {
+        return function(err) {
+          if (!err) {
+            _this.emit('begin');
+          }
+          return callback(err);
+        };
+      })(this));
+      return this;
+    };
+
+
+    /*
+    	Commit a transaction.
+    	
+    	@callback [callback] A callback which is called after transaction has commited, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    	@returns {Transaction|Promise}
+     */
+
+    Transaction.prototype.commit = function(callback) {
+      if (callback != null) {
+        return this._commit(callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._commit(function(err) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve();
+          });
+        };
+      })(this));
+    };
+
+    Transaction.prototype._commit = function(callback) {
+      if (!this._pooledConnection) {
+        callback(new TransactionError("Transaction has not begun. Call begin() first.", 'ENOTBEGUN'));
+        return this;
+      }
+      if (this._working) {
+        callback(new TransactionError("Can't commit transaction. There is a request in progress.", 'EREQINPROG'));
+        return this;
+      }
+      if (this._queue.length) {
+        callback(new TransactionError("Can't commit transaction. There are request in queue.", 'EREQINPROG'));
+        return this;
+      }
+      this.connection.driver.Transaction.prototype.commit.call(this, (function(_this) {
+        return function(err) {
+          if (!err) {
+            _this.emit('commit');
+          }
+          return callback(err);
+        };
+      })(this));
+      return this;
+    };
+
+
+    /*
+    	Execute next request in queue.
+    	
+    	@private
+    	@returns {Transaction}
+     */
+
+    Transaction.prototype.next = function() {
+      var toAbort;
+      if (this._aborted) {
+        toAbort = this._queue;
+        this._queue = [];
+        process.nextTick((function(_this) {
+          return function() {
+            var results;
+            results = [];
+            while (toAbort.length) {
+              results.push(toAbort.shift()(new TransactionError("Transaction aborted.", "EABORT")));
+            }
+            return results;
+          };
+        })(this));
+      }
+      this._working = false;
+      if (this._queue.length) {
+        process.nextTick((function(_this) {
+          return function() {
+            if (_this._aborted) {
+              return _this.next();
+            }
+            _this._working = true;
+            return _this._queue.shift()(null, _this._pooledConnection);
+          };
+        })(this));
+      }
+      return this;
+    };
+
+
+    /*
+    	Add request to queue for connection. If queue is empty, execute the request immediately.
+    	
+    	@private
+    	@callback callback A callback to call when connection in ready to execute request.
+    		@param {Error} err Error on error, otherwise null.
+    		@param {*} conn Internal driver's connection.
+    	@returns {Transaction}
+     */
+
+    Transaction.prototype.queue = function(callback) {
+      if (this._dedicatedConnection) {
+        callback(null, this._dedicatedConnection);
+        return this;
+      }
+      if (!this._pooledConnection) {
+        callback(new TransactionError("Transaction has not begun. Call begin() first.", 'ENOTBEGUN'));
+        return this;
+      }
+      if (this._working || this._queue.length) {
+        this._queue.push(callback);
+      } else {
+        this._working = true;
+        callback(null, this._pooledConnection);
+      }
+      return this;
+    };
+
+
+    /*
+    	Returns new request using this transaction.
+    	
+    	@returns {Request}
+     */
+
+    Transaction.prototype.request = function() {
+      return new Request(this);
+    };
+
+
+    /*
+    	Rollback a transaction.
+    	
+    	@callback [callback] A callback which is called after transaction has rolled back, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    	@returns {Transaction|Promise}
+     */
+
+    Transaction.prototype.rollback = function(callback) {
+      if (callback != null) {
+        return this._rollback(callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._rollback(function(err) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve();
+          });
+        };
+      })(this));
+    };
+
+    Transaction.prototype._rollback = function(callback) {
+      if (this._aborted) {
+        callback(new TransactionError("Transaction has been aborted.", 'EABORT'));
+        return this;
+      }
+      if (!this._pooledConnection) {
+        callback(new TransactionError("Transaction has not begun. Call begin() first.", 'ENOTBEGUN'));
+        return this;
+      }
+      if (this._working) {
+        callback(new TransactionError("Can't rollback transaction. There is a request in progress.", 'EREQINPROG'));
+        return this;
+      }
+      if (this._queue.length) {
+        this._aborted = true;
+      }
+      this.connection.driver.Transaction.prototype.rollback.call(this, (function(_this) {
+        return function(err) {
+          if (!err) {
+            _this.emit('rollback', _this._aborted);
+          }
+          return callback(err);
+        };
+      })(this));
+      return this;
+    };
+
+    return Transaction;
+
+  })(EventEmitter);
+
+
+  /*
+  Class Request.
+  
+  @property {Connection} connection Reference to used connection.
+  @property {Transaction} transaction Reference to transaction when request was created in transaction.
+  @property {*} parameters Collection of input and output parameters.
+  @property {Boolean} verbose If `true`, debug messages are printed to message log.
+  @property {Boolean} multiple If `true`, `query` will handle multiple recordsets (`execute` always expect multiple recordsets).
+  @property {Boolean} canceled `true` if request was canceled.
+  
+  @event recordset Dispatched when metadata for new recordset are parsed.
+  @event row Dispatched when new row is parsed.
+  @event done Dispatched when request is complete.
+  @event error Dispatched on error.
+   */
+
+  Request = (function(superClass) {
+    extend(Request, superClass);
+
+    Request.prototype.connection = null;
+
+    Request.prototype.transaction = null;
+
+    Request.prototype.pstatement = null;
+
+    Request.prototype.parameters = null;
+
+    Request.prototype.verbose = false;
+
+    Request.prototype.multiple = false;
+
+    Request.prototype.canceled = false;
+
+    Request.prototype.stream = null;
+
+
+    /*
+    	Create new Request.
+    	
+    	@param {Connection|Transaction} connection If ommited, global connection is used instead.
+     */
+
+    function Request(connection) {
+      if (connection instanceof Transaction) {
+        this.transaction = connection;
+        this.connection = connection.connection;
+      } else if (connection instanceof PreparedStatement) {
+        this.pstatement = connection;
+        this.connection = connection.connection;
+      } else if (connection instanceof Connection) {
+        this.connection = connection;
+      } else {
+        this.connection = global_connection;
+      }
+      this.parameters = {};
+    }
+
+
+    /*
+    	Log to a function if assigned. Else, use console.log.
+     */
+
+    Request.prototype._log = function(out) {
+      if (typeof this.logger === "function") {
+        return this.logger(out);
+      } else {
+        return console.log(out);
+      }
+    };
+
+
+    /*
+    	Acquire connection for this request from connection.
+     */
+
+    Request.prototype._acquire = function(callback) {
+      if (this.transaction) {
+        return this.transaction.queue(callback);
+      } else if (this.pstatement) {
+        return this.pstatement.queue(callback);
+      } else {
+        if (!this.connection.pool) {
+          return callback(new ConnectionError("Connection not yet open.", 'ENOTOPEN'));
+        }
+        return this.connection.pool.acquire(callback);
+      }
+    };
+
+
+    /*
+    	Release connection used by this request.
+     */
+
+    Request.prototype._release = function(connection) {
+      if (this.transaction) {
+        return this.transaction.next();
+      } else if (this.pstatement) {
+        return this.pstatement.next();
+      } else {
+        return this.connection.pool.release(connection);
+      }
+    };
+
+
+    /*
+    	Add an input parameter to the request.
+    	
+    	**Example:**
+    	```
+    	request.input('input_parameter', value);
+    	request.input('input_parameter', sql.Int, value);
+    	```
+    	
+    	@param {String} name Name of the input parameter without @ char.
+    	@param {*} [type] SQL data type of input parameter. If you omit type, module automaticaly decide which SQL data type should be used based on JS data type.
+    	@param {*} value Input parameter value. `undefined` and `NaN` values are automatically converted to `null` values.
+    	@returns {Request}
+     */
+
+    Request.prototype.input = function(name, type, value) {
+      if (/(--| |\/\*|\*\/|')/.test(name)) {
+        throw new RequestError("SQL injection warning for param '" + name + "'", 'EINJECT');
+      }
+      if (arguments.length === 1) {
+        throw new RequestError("Invalid number of arguments. At least 2 arguments expected.", 'EARGS');
+      } else if (arguments.length === 2) {
+        value = type;
+        type = getTypeByValue(value);
+      }
+      if ((value != null ? value.valueOf : void 0) && !(value instanceof Date)) {
+        value = value.valueOf();
+      }
+      if (value === void 0) {
+        value = null;
+      }
+      if (value !== value) {
+        value = null;
+      }
+      if (type instanceof Function) {
+        type = type();
+      }
+      this.parameters[name] = {
+        name: name,
+        type: type.type,
+        io: 1,
+        value: value,
+        length: type.length,
+        scale: type.scale,
+        precision: type.precision,
+        tvpType: type.tvpType
+      };
+      return this;
+    };
+
+
+    /*
+    	Add an output parameter to the request.
+    	
+    	**Example:**
+    	```
+    	request.output('output_parameter', sql.Int);
+    	request.output('output_parameter', sql.VarChar(50), 'abc');
+    	```
+    	
+    	@param {String} name Name of the output parameter without @ char.
+    	@param {*} type SQL data type of output parameter.
+    	@param {*} [value] Output parameter value initial value. `undefined` and `NaN` values are automatically converted to `null` values. Optional.
+    	@returns {Request}
+     */
+
+    Request.prototype.output = function(name, type, value) {
+      if (!type) {
+        type = TYPES.NVarChar;
+      }
+      if (/(--| |\/\*|\*\/|')/.test(name)) {
+        throw new RequestError("SQL injection warning for param '" + name + "'", 'EINJECT');
+      }
+      if (type === TYPES.Text || type === TYPES.NText || type === TYPES.Image) {
+        throw new RequestError("Deprecated types (Text, NText, Image) are not supported as OUTPUT parameters.", 'EDEPRECATED');
+      }
+      if ((value != null ? value.valueOf : void 0) && !(value instanceof Date)) {
+        value = value.valueOf();
+      }
+      if (value === void 0) {
+        value = null;
+      }
+      if (value !== value) {
+        value = null;
+      }
+      if (type instanceof Function) {
+        type = type();
+      }
+      this.parameters[name] = {
+        name: name,
+        type: type.type,
+        io: 2,
+        value: value,
+        length: type.length,
+        scale: type.scale,
+        precision: type.precision
+      };
+      return this;
+    };
+
+
+    /*
+    	Execute the SQL batch.
+    
+    	@param {String} batch T-SQL batch to be executed.
+    	@callback [callback] A callback which is called after execution has completed, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    		@param {*} recordset Recordset.
+    	
+    	@returns {Request|Promise}
+     */
+
+    Request.prototype.batch = function(batch, callback) {
+      var ref1;
+      if (this.stream == null) {
+        this.stream = (ref1 = this.connection) != null ? ref1.config.stream : void 0;
+      }
+      if (this.stream || (callback != null)) {
+        return this._batch(batch, callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._batch(batch, function(err, recordset) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve(recordset);
+          });
+        };
+      })(this));
+    };
+
+    Request.prototype._batch = function(batch, callback) {
+      if (!this.connection) {
+        return process.nextTick((function(_this) {
+          return function() {
+            var e;
+            e = new RequestError("No connection is specified for that request.", 'ENOCONN');
+            if (_this.stream) {
+              _this.emit('error', e);
+              return _this.emit('done');
+            } else {
+              return callback(e);
+            }
+          };
+        })(this));
+      }
+      if (!this.connection.connected) {
+        return process.nextTick((function(_this) {
+          return function() {
+            var e;
+            e = new ConnectionError("Connection is closed.", 'ECONNCLOSED');
+            if (_this.stream) {
+              _this.emit('error', e);
+              return _this.emit('done');
+            } else {
+              return callback(e);
+            }
+          };
+        })(this));
+      }
+      this.canceled = false;
+      this.connection.driver.Request.prototype.batch.call(this, batch, (function(_this) {
+        return function(err, recordset) {
+          if (_this.stream) {
+            if (err) {
+              _this.emit('error', err);
+            }
+            return _this.emit('done');
+          } else {
+            return callback(err, recordset);
+          }
+        };
+      })(this));
+      return this;
+    };
+
+
+    /*
+    	Bulk load.
+    
+    	@param {Table} table SQL table.
+    	@callback [callback] A callback which is called after bulk load has completed, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    	
+    	@returns {Request|Promise}
+     */
+
+    Request.prototype.bulk = function(table, callback) {
+      var ref1;
+      if (this.stream == null) {
+        this.stream = (ref1 = this.connection) != null ? ref1.config.stream : void 0;
+      }
+      if (this.stream || (callback != null)) {
+        return this._bulk(table, callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._bulk(table, function(err, rowCount) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve(rowCount);
+          });
+        };
+      })(this));
+    };
+
+    Request.prototype._bulk = function(table, callback) {
+      if (!this.connection) {
+        return process.nextTick((function(_this) {
+          return function() {
+            var e;
+            e = new RequestError("No connection is specified for that request.", 'ENOCONN');
+            if (_this.stream) {
+              _this.emit('error', e);
+              return _this.emit('done');
+            } else {
+              return callback(e);
+            }
+          };
+        })(this));
+      }
+      if (!this.connection.connected) {
+        return process.nextTick((function(_this) {
+          return function() {
+            var e;
+            e = new ConnectionError("Connection is closed.", 'ECONNCLOSED');
+            if (_this.stream) {
+              _this.emit('error', e);
+              return _this.emit('done');
+            } else {
+              return callback(e);
+            }
+          };
+        })(this));
+      }
+      this.canceled = false;
+      this.connection.driver.Request.prototype.bulk.call(this, table, (function(_this) {
+        return function(err, rowCount) {
+          if (_this.stream) {
+            if (err) {
+              _this.emit('error', err);
+            }
+            return _this.emit('done');
+          } else {
+            return callback(err, rowCount);
+          }
+        };
+      })(this));
+      return this;
+    };
+
+
+    /*
+    	Sets request to `stream` mode and pulls all rows from all recordsets to a given stream.
+    	
+    	@param {Stream} stream Stream to pipe data into.
+    	@returns {Stream}
+     */
+
+    Request.prototype.pipe = function(stream) {
+      this.stream = true;
+      this.on('row', stream.write.bind(stream));
+      this.on('error', stream.emit.bind(stream, 'error'));
+      this.on('done', function() {
+        return setImmediate(function() {
+          return stream.end();
+        });
+      });
+      stream.emit('pipe', this);
+      return stream;
+    };
+
+
+    /*
+    	Execute the SQL command.
+    	
+    	**Example:**
+    	```
+    	var request = new sql.Request();
+    	request.query('select 1 as number', function(err, recordset) {
+    	    console.log(recordset[0].number); // return 1
+    	
+    	    // ...
+    	});
+    	```
+    	
+    	You can enable multiple recordsets in querries by `request.multiple = true` command.
+    	
+    	```
+    	var request = new sql.Request();
+    	request.multiple = true;
+    	
+    	request.query('select 1 as number; select 2 as number', function(err, recordsets) {
+    	    console.log(recordsets[0][0].number); // return 1
+    	    console.log(recordsets[1][0].number); // return 2
+    	
+    	    // ...
+    	});
+    	```
+    	
+    	@param {String} command T-SQL command to be executed.
+    	@callback [callback] A callback which is called after execution has completed, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    		@param {*} recordset Recordset.
+    	
+    	@returns {Request|Promise}
+     */
+
+    Request.prototype.query = function(command, callback) {
+      var ref1;
+      if (this.stream == null) {
+        this.stream = (ref1 = this.connection) != null ? ref1.config.stream : void 0;
+      }
+      if (this.stream || (callback != null)) {
+        return this._query(command, callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._query(command, function(err, recordset) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve(recordset);
+          });
+        };
+      })(this));
+    };
+
+    Request.prototype._query = function(command, callback) {
+      if (!this.connection) {
+        return process.nextTick((function(_this) {
+          return function() {
+            var e;
+            e = new RequestError("No connection is specified for that request.", 'ENOCONN');
+            if (_this.stream) {
+              _this.emit('error', e);
+              return _this.emit('done');
+            } else {
+              return callback(e);
+            }
+          };
+        })(this));
+      }
+      if (!this.connection.connected) {
+        return process.nextTick((function(_this) {
+          return function() {
+            var e;
+            e = new ConnectionError("Connection is closed.", 'ECONNCLOSED');
+            if (_this.stream) {
+              _this.emit('error', e);
+              return _this.emit('done');
+            } else {
+              return callback(e);
+            }
+          };
+        })(this));
+      }
+      this.canceled = false;
+      this.connection.driver.Request.prototype.query.call(this, command, (function(_this) {
+        return function(err, recordset) {
+          if (_this.stream) {
+            if (err) {
+              _this.emit('error', err);
+            }
+            return _this.emit('done');
+          } else {
+            return callback(err, recordset);
+          }
+        };
+      })(this));
+      return this;
+    };
+
+
+    /*
+    	Call a stored procedure.
+    	
+    	**Example:**
+    	```
+    	var request = new sql.Request();
+    	request.input('input_parameter', sql.Int, value);
+    	request.output('output_parameter', sql.Int);
+    	request.execute('procedure_name', function(err, recordsets, returnValue) {
+    	    console.log(recordsets.length); // count of recordsets returned by procedure
+    	    console.log(recordset[0].length); // count of rows contained in first recordset
+    	    console.log(returnValue); // procedure return value
+    	    console.log(recordsets.returnValue); // procedure return value
+    	
+    	    console.log(request.parameters.output_parameter.value); // output value
+    	
+    	    // ...
+    	});
+    	```
+    	
+    	@param {String} procedure Name of the stored procedure to be executed.
+    	@callback [callback] A callback which is called after execution has completed, or an error has occurred. If omited, method returns Promise.
+    		@param {Error} err Error on error, otherwise null.
+    		@param {Array} recordsets Recordsets.
+    		@param {Number} returnValue Procedure return value.
+    	
+    	@returns {Request|Promise}
+     */
+
+    Request.prototype.execute = function(command, callback) {
+      var ref1;
+      if (this.stream == null) {
+        this.stream = (ref1 = this.connection) != null ? ref1.config.stream : void 0;
+      }
+      if (this.stream || (callback != null)) {
+        return this._execute(command, callback);
+      }
+      return new module.exports.Promise((function(_this) {
+        return function(resolve, reject) {
+          return _this._execute(command, function(err, recordset) {
+            if (err) {
+              return reject(err);
+            }
+            return resolve(recordset);
+          });
+        };
+      })(this));
+    };
+
+    Request.prototype._execute = function(procedure, callback) {
+      if (!this.connection) {
+        return process.nextTick(function() {
+          var e;
+          e = new RequestError("No connection is specified for that request.", 'ENOCONN');
+          if (this.stream) {
+            this.emit('error', e);
+            return this.emit('done');
+          } else {
+            return callback(e);
+          }
+        });
+      }
+      if (!this.connection.connected) {
+        return process.nextTick((function(_this) {
+          return function() {
+            var e;
+            e = new ConnectionError("Connection is closed.", 'ECONNCLOSED');
+            if (_this.stream) {
+              _this.emit('error', e);
+              return _this.emit('done');
+            } else {
+              return callback(e);
+            }
+          };
+        })(this));
+      }
+      this.canceled = false;
+      this.connection.driver.Request.prototype.execute.call(this, procedure, (function(_this) {
+        return function(err, recordsets, returnValue) {
+          if (_this.stream) {
+            if (err) {
+              _this.emit('error', err);
+            }
+            return _this.emit('done', returnValue);
+          } else {
+            return callback(err, recordsets, returnValue);
+          }
+        };
+      })(this));
+      return this;
+    };
+
+
+    /*
+    	Cancel currently executed request.
+    	
+    	@returns {Request}
+     */
+
+    Request.prototype.cancel = function() {
+      this.canceled = true;
+      this.connection.driver.Request.prototype.cancel.call(this);
+      return this;
+    };
+
+    return Request;
+
+  })(EventEmitter);
+
+  ConnectionError = (function(superClass) {
+    extend(ConnectionError, superClass);
+
+    function ConnectionError(message, code) {
+      var err;
+      if (!(this instanceof ConnectionError)) {
+        if (message instanceof Error) {
+          err = new ConnectionError(message.message, message.code);
+          Object.defineProperty(err, 'originalError', {
+            value: message
+          });
+          Error.captureStackTrace(err, arguments.callee);
+          return err;
+        } else {
+          err = new ConnectionError(message);
+          Error.captureStackTrace(err, arguments.callee);
+          return err;
+        }
+      }
+      this.name = this.constructor.name;
+      this.message = message;
+      if (code != null) {
+        this.code = code;
+      }
+      ConnectionError.__super__.constructor.call(this);
+      Error.captureStackTrace(this, this.constructor);
+    }
+
+    return ConnectionError;
+
+  })(Error);
+
+  TransactionError = (function(superClass) {
+    extend(TransactionError, superClass);
+
+    function TransactionError(message, code) {
+      var err;
+      if (!(this instanceof TransactionError)) {
+        if (message instanceof Error) {
+          err = new TransactionError(message.message, message.code);
+          Object.defineProperty(err, 'originalError', {
+            value: message
+          });
+          Error.captureStackTrace(err, arguments.callee);
+          return err;
+        } else {
+          err = new TransactionError(message);
+          Error.captureStackTrace(err, arguments.callee);
+          return err;
+        }
+      }
+      this.name = this.constructor.name;
+      this.message = message;
+      if (code != null) {
+        this.code = code;
+      }
+      TransactionError.__super__.constructor.call(this);
+      Error.captureStackTrace(this, this.constructor);
+    }
+
+    return TransactionError;
+
+  })(Error);
+
+  RequestError = (function(superClass) {
+    extend(RequestError, superClass);
+
+    function RequestError(message, code) {
+      var err, ref1, ref10, ref11, ref2, ref3, ref4, ref5, ref6, ref7, ref8, ref9;
+      if (!(this instanceof RequestError)) {
+        if (message instanceof Error) {
+          err = new RequestError(message.message, (ref1 = message.code) != null ? ref1 : code);
+          err.number = (ref2 = (ref3 = message.info) != null ? ref3.number : void 0) != null ? ref2 : message.code;
+          err.lineNumber = (ref4 = message.info) != null ? ref4.lineNumber : void 0;
+          err.state = (ref5 = (ref6 = message.info) != null ? ref6.state : void 0) != null ? ref5 : message.sqlstate;
+          err["class"] = (ref7 = (ref8 = message.info) != null ? ref8["class"] : void 0) != null ? ref7 : (ref9 = message.info) != null ? ref9.severity : void 0;
+          err.serverName = (ref10 = message.info) != null ? ref10.serverName : void 0;
+          err.procName = (ref11 = message.info) != null ? ref11.procName : void 0;
+          Object.defineProperty(err, 'originalError', {
+            value: message
+          });
+          Error.captureStackTrace(err, arguments.callee);
+          return err;
+        } else {
+          err = new RequestError(message);
+          Error.captureStackTrace(err, arguments.callee);
+          return err;
+        }
+      }
+      this.name = this.constructor.name;
+      this.message = message;
+      if (code != null) {
+        this.code = code;
+      }
+      RequestError.__super__.constructor.call(this);
+      Error.captureStackTrace(this, this.constructor);
+    }
+
+    return RequestError;
+
+  })(Error);
+
+  PreparedStatementError = (function(superClass) {
+    extend(PreparedStatementError, superClass);
+
+    function PreparedStatementError(message, code) {
+      var err;
+      if (!(this instanceof PreparedStatementError)) {
+        if (message instanceof Error) {
+          err = new PreparedStatementError(message.message, message.code);
+          err.originalError = message;
+          Error.captureStackTrace(err, arguments.callee);
+          return err;
+        } else {
+          err = new PreparedStatementError(message);
+          Error.captureStackTrace(err, arguments.callee);
+          return err;
+        }
+      }
+      this.name = this.constructor.name;
+      this.message = message;
+      this.code = code;
+      PreparedStatementError.__super__.constructor.call(this);
+      Error.captureStackTrace(this, this.constructor);
+    }
+
+    return PreparedStatementError;
+
+  })(Error);
+
+
+  /*
+  Open global connection.
+  
+  @param {Object} config Connection configuration.
+  @callback callback A callback which is called after connection has established, or an error has occurred.
+  	@param {Error} err Error on error, otherwise null.
+  	
+  @returns {Connection}
+   */
+
+  module.exports.connect = function(config, callback) {
+    global_connection = new Connection(config);
+    return global_connection.connect(callback);
+  };
+
+
+  /*
+  Close global connection.
+  	
+  @returns {Connection}
+   */
+
+  module.exports.close = function(callback) {
+    return global_connection != null ? global_connection.close(callback) : void 0;
+  };
+
+  module.exports.on = function(event, handler) {
+    return global_connection != null ? global_connection.on(event, handler) : void 0;
+  };
+
+  module.exports.Connection = Connection;
+
+  module.exports.Transaction = Transaction;
+
+  module.exports.Request = Request;
+
+  module.exports.Table = Table;
+
+  module.exports.PreparedStatement = PreparedStatement;
+
+  module.exports.ConnectionError = ConnectionError;
+
+  module.exports.TransactionError = TransactionError;
+
+  module.exports.RequestError = RequestError;
+
+  module.exports.PreparedStatementError = PreparedStatementError;
+
+  module.exports.ISOLATION_LEVEL = ISOLATION_LEVEL;
+
+  module.exports.DRIVERS = DRIVERS;
+
+  module.exports.TYPES = TYPES;
+
+  module.exports.MAX = 65535;
+
+  module.exports.map = map;
+
+  module.exports.fix = true;
+
+  module.exports.Promise = (ref1 = global.Promise) != null ? ref1 : require('promise');
+
+  for (key in TYPES) {
+    value = TYPES[key];
+    module.exports[key] = value;
+    module.exports[key.toUpperCase()] = value;
+  }
+
+  module.exports.pool = {
+    max: 10,
+    min: 0,
+    idleTimeoutMillis: 30000
+  };
+
+  module.exports.connection = {
+    userName: '',
+    password: '',
+    server: ''
+  };
+
+
+  /*
+  Initialize Tedious connection pool.
+  
+  @deprecated
+   */
+
+  module.exports.init = function() {
+    return module.exports.connect({
+      user: module.exports.connection.userName,
+      password: module.exports.connection.password,
+      server: module.exports.connection.server,
+      options: module.exports.connection.options,
+      driver: 'tedious',
+      pool: module.exports.pool
+    });
+  };
+
+}).call(this);
+
+}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
+},{"./connectionstring":485,"./datatypes":486,"./isolationlevel":487,"./table":489,"_process":279,"buffer":58,"events":111,"fs":56,"promise":490,"util":396}],489:[function(require,module,exports){
+// Generated by CoffeeScript 1.10.0
+(function() {
+  var JSON_COLUMN_ID, MAX, TYPES, Table, declare, ref,
+    slice = [].slice;
+
+  ref = require('./datatypes'), TYPES = ref.TYPES, declare = ref.declare;
+
+  MAX = 65535;
+
+  JSON_COLUMN_ID = 'JSON_F52E2B61-18A1-11d1-B105-00805F49916B';
+
+  Table = (function() {
+    function Table(name) {
+      var buffer, char, cursor, escaped, length, path;
+      if (name) {
+        length = name.length;
+        cursor = -1;
+        buffer = '';
+        escaped = false;
+        path = [];
+        while (++cursor < length) {
+          char = name.charAt(cursor);
+          if (char === '[') {
+            if (escaped) {
+              buffer += char;
+            } else {
+              escaped = true;
+            }
+          } else if (char === ']') {
+            if (escaped) {
+              escaped = false;
+            } else {
+              throw new Error("Invalid table name.");
+            }
+          } else if (char === '.') {
+            if (escaped) {
+              buffer += char;
+            } else {
+              path.push(buffer);
+              buffer = '';
+            }
+          } else {
+            buffer += char;
+          }
+        }
+        if (buffer) {
+          path.push(buffer);
+        }
+        switch (path.length) {
+          case 1:
+            this.name = path[0];
+            this.schema = null;
+            this.database = null;
+            break;
+          case 2:
+            this.name = path[1];
+            this.schema = path[0];
+            this.database = null;
+            break;
+          case 3:
+            this.name = path[2];
+            this.schema = path[1];
+            this.database = path[0];
+        }
+        this.path = "" + (this.database ? "[" + this.database + "]." : "") + (this.schema ? "[" + this.schema + "]." : "") + "[" + this.name + "]";
+        this.temporary = this.name.charAt(0) === '#';
+      }
+      this.columns = [];
+      this.rows = [];
+      Object.defineProperty(this.columns, "add", {
+        value: function(name, column, options) {
+          if (options == null) {
+            options = {};
+          }
+          if (column == null) {
+            throw new Error("Column data type is not defined.");
+          }
+          if (column instanceof Function) {
+            column = column();
+          }
+          column.name = name;
+          column.nullable = options.nullable;
+          return this.push(column);
+        }
+      });
+      Object.defineProperty(this.rows, "add", {
+        value: function() {
+          var values;
+          values = 1 <= arguments.length ? slice.call(arguments, 0) : [];
+          return this.push(values);
+        }
+      });
+    }
+
+
+    /*
+    	@private
+     */
+
+    Table.prototype._makeBulk = function() {
+      var col, i, len, ref1;
+      ref1 = this.columns;
+      for (i = 0, len = ref1.length; i < len; i++) {
+        col = ref1[i];
+        switch (col.type) {
+          case TYPES.Xml:
+            col.type = TYPES.NVarChar(MAX).type;
+            break;
+          case TYPES.UDT:
+          case TYPES.Geography:
+          case TYPES.Geometry:
+            col.type = TYPES.VarBinary(MAX).type;
+        }
+      }
+      return this;
+    };
+
+    Table.prototype.declare = function() {
+      var col;
+      return "create table " + this.path + " (" + (((function() {
+        var i, len, ref1, results;
+        ref1 = this.columns;
+        results = [];
+        for (i = 0, len = ref1.length; i < len; i++) {
+          col = ref1[i];
+          results.push("[" + col.name + "] " + (declare(col.type, col)) + (col.nullable === true ? " null" : col.nullable === false ? " not null" : ""));
+        }
+        return results;
+      }).call(this)).join(', ')) + ")";
+    };
+
+    Table.fromRecordset = function(recordset) {
+      var col, i, j, len, len1, name, ref1, ref2, row, t;
+      t = new this;
+      ref1 = recordset.columns;
+      for (name in ref1) {
+        col = ref1[name];
+        t.columns.add(name, {
+          type: col.type,
+          length: col.length,
+          scale: col.scale,
+          precision: col.precision
+        }, {
+          nullable: col.nullable
+        });
+      }
+      if (t.columns.length === 1 && t.columns[0].name === JSON_COLUMN_ID) {
+        for (i = 0, len = recordset.length; i < len; i++) {
+          row = recordset[i];
+          t.rows.add(JSON.stringify(row));
+        }
+      } else {
+        for (j = 0, len1 = recordset.length; j < len1; j++) {
+          row = recordset[j];
+          (ref2 = t.rows).add.apply(ref2, (function() {
+            var k, len2, ref2, results;
+            ref2 = t.columns;
+            results = [];
+            for (k = 0, len2 = ref2.length; k < len2; k++) {
+              col = ref2[k];
+              results.push(row[col.name]);
+            }
+            return results;
+          })());
+        }
+      }
+      return t;
+    };
+
+    return Table;
+
+  })();
+
+  module.exports = Table;
+
+}).call(this);
+
+},{"./datatypes":486}],490:[function(require,module,exports){
+'use strict';
+
+module.exports = require('./lib')
+
+},{"./lib":495}],491:[function(require,module,exports){
+'use strict';
+
+var asap = require('asap/raw');
+
+function noop() {}
+
+// States:
+//
+// 0 - pending
+// 1 - fulfilled with _value
+// 2 - rejected with _value
+// 3 - adopted the state of another promise, _value
+//
+// once the state is no longer pending (0) it is immutable
+
+// All `_` prefixed properties will be reduced to `_{random number}`
+// at build time to obfuscate them and discourage their use.
+// We don't use symbols or Object.defineProperty to fully hide them
+// because the performance isn't good enough.
+
+
+// to avoid using try/catch inside critical functions, we
+// extract them to here.
+var LAST_ERROR = null;
+var IS_ERROR = {};
+function getThen(obj) {
+  try {
+    return obj.then;
+  } catch (ex) {
+    LAST_ERROR = ex;
+    return IS_ERROR;
+  }
+}
+
+function tryCallOne(fn, a) {
+  try {
+    return fn(a);
+  } catch (ex) {
+    LAST_ERROR = ex;
+    return IS_ERROR;
+  }
+}
+function tryCallTwo(fn, a, b) {
+  try {
+    fn(a, b);
+  } catch (ex) {
+    LAST_ERROR = ex;
+    return IS_ERROR;
+  }
+}
+
+module.exports = Promise;
+
+function Promise(fn) {
+  if (typeof this !== 'object') {
+    throw new TypeError('Promises must be constructed via new');
+  }
+  if (typeof fn !== 'function') {
+    throw new TypeError('not a function');
+  }
+  this._45 = 0;
+  this._81 = 0;
+  this._65 = null;
+  this._54 = null;
+  if (fn === noop) return;
+  doResolve(fn, this);
+}
+Promise._10 = null;
+Promise._97 = null;
+Promise._61 = noop;
+
+Promise.prototype.then = function(onFulfilled, onRejected) {
+  if (this.constructor !== Promise) {
+    return safeThen(this, onFulfilled, onRejected);
+  }
+  var res = new Promise(noop);
+  handle(this, new Handler(onFulfilled, onRejected, res));
+  return res;
+};
+
+function safeThen(self, onFulfilled, onRejected) {
+  return new self.constructor(function (resolve, reject) {
+    var res = new Promise(noop);
+    res.then(resolve, reject);
+    handle(self, new Handler(onFulfilled, onRejected, res));
+  });
+};
+function handle(self, deferred) {
+  while (self._81 === 3) {
+    self = self._65;
+  }
+  if (Promise._10) {
+    Promise._10(self);
+  }
+  if (self._81 === 0) {
+    if (self._45 === 0) {
+      self._45 = 1;
+      self._54 = deferred;
+      return;
+    }
+    if (self._45 === 1) {
+      self._45 = 2;
+      self._54 = [self._54, deferred];
+      return;
+    }
+    self._54.push(deferred);
+    return;
+  }
+  handleResolved(self, deferred);
+}
+
+function handleResolved(self, deferred) {
+  asap(function() {
+    var cb = self._81 === 1 ? deferred.onFulfilled : deferred.onRejected;
+    if (cb === null) {
+      if (self._81 === 1) {
+        resolve(deferred.promise, self._65);
+      } else {
+        reject(deferred.promise, self._65);
+      }
+      return;
+    }
+    var ret = tryCallOne(cb, self._65);
+    if (ret === IS_ERROR) {
+      reject(deferred.promise, LAST_ERROR);
+    } else {
+      resolve(deferred.promise, ret);
+    }
+  });
+}
+function resolve(self, newValue) {
+  // Promise Resolution Procedure: https://github.com/promises-aplus/promises-spec#the-promise-resolution-procedure
+  if (newValue === self) {
+    return reject(
+      self,
+      new TypeError('A promise cannot be resolved with itself.')
+    );
+  }
+  if (
+    newValue &&
+    (typeof newValue === 'object' || typeof newValue === 'function')
+  ) {
+    var then = getThen(newValue);
+    if (then === IS_ERROR) {
+      return reject(self, LAST_ERROR);
+    }
+    if (
+      then === self.then &&
+      newValue instanceof Promise
+    ) {
+      self._81 = 3;
+      self._65 = newValue;
+      finale(self);
+      return;
+    } else if (typeof then === 'function') {
+      doResolve(then.bind(newValue), self);
+      return;
+    }
+  }
+  self._81 = 1;
+  self._65 = newValue;
+  finale(self);
+}
+
+function reject(self, newValue) {
+  self._81 = 2;
+  self._65 = newValue;
+  if (Promise._97) {
+    Promise._97(self, newValue);
+  }
+  finale(self);
+}
+function finale(self) {
+  if (self._45 === 1) {
+    handle(self, self._54);
+    self._54 = null;
+  }
+  if (self._45 === 2) {
+    for (var i = 0; i < self._54.length; i++) {
+      handle(self, self._54[i]);
+    }
+    self._54 = null;
+  }
+}
+
+function Handler(onFulfilled, onRejected, promise){
+  this.onFulfilled = typeof onFulfilled === 'function' ? onFulfilled : null;
+  this.onRejected = typeof onRejected === 'function' ? onRejected : null;
+  this.promise = promise;
+}
+
+/**
+ * Take a potentially misbehaving resolver function and make sure
+ * onFulfilled and onRejected are only called once.
+ *
+ * Makes no guarantees about asynchrony.
+ */
+function doResolve(fn, promise) {
+  var done = false;
+  var res = tryCallTwo(fn, function (value) {
+    if (done) return;
+    done = true;
+    resolve(promise, value);
+  }, function (reason) {
+    if (done) return;
+    done = true;
+    reject(promise, reason);
+  })
+  if (!done && res === IS_ERROR) {
+    done = true;
+    reject(promise, LAST_ERROR);
+  }
+}
+
+},{"asap/raw":499}],492:[function(require,module,exports){
+'use strict';
+
+var Promise = require('./core.js');
+
+module.exports = Promise;
+Promise.prototype.done = function (onFulfilled, onRejected) {
+  var self = arguments.length ? this.then.apply(this, arguments) : this;
+  self.then(null, function (err) {
+    setTimeout(function () {
+      throw err;
+    }, 0);
+  });
+};
+
+},{"./core.js":491}],493:[function(require,module,exports){
+'use strict';
+
+//This file contains the ES6 extensions to the core Promises/A+ API
+
+var Promise = require('./core.js');
+
+module.exports = Promise;
+
+/* Static Functions */
+
+var TRUE = valuePromise(true);
+var FALSE = valuePromise(false);
+var NULL = valuePromise(null);
+var UNDEFINED = valuePromise(undefined);
+var ZERO = valuePromise(0);
+var EMPTYSTRING = valuePromise('');
+
+function valuePromise(value) {
+  var p = new Promise(Promise._61);
+  p._81 = 1;
+  p._65 = value;
+  return p;
+}
+Promise.resolve = function (value) {
+  if (value instanceof Promise) return value;
+
+  if (value === null) return NULL;
+  if (value === undefined) return UNDEFINED;
+  if (value === true) return TRUE;
+  if (value === false) return FALSE;
+  if (value === 0) return ZERO;
+  if (value === '') return EMPTYSTRING;
+
+  if (typeof value === 'object' || typeof value === 'function') {
+    try {
+      var then = value.then;
+      if (typeof then === 'function') {
+        return new Promise(then.bind(value));
+      }
+    } catch (ex) {
+      return new Promise(function (resolve, reject) {
+        reject(ex);
+      });
+    }
+  }
+  return valuePromise(value);
+};
+
+Promise.all = function (arr) {
+  var args = Array.prototype.slice.call(arr);
+
+  return new Promise(function (resolve, reject) {
+    if (args.length === 0) return resolve([]);
+    var remaining = args.length;
+    function res(i, val) {
+      if (val && (typeof val === 'object' || typeof val === 'function')) {
+        if (val instanceof Promise && val.then === Promise.prototype.then) {
+          while (val._81 === 3) {
+            val = val._65;
+          }
+          if (val._81 === 1) return res(i, val._65);
+          if (val._81 === 2) reject(val._65);
+          val.then(function (val) {
+            res(i, val);
+          }, reject);
+          return;
+        } else {
+          var then = val.then;
+          if (typeof then === 'function') {
+            var p = new Promise(then.bind(val));
+            p.then(function (val) {
+              res(i, val);
+            }, reject);
+            return;
+          }
+        }
+      }
+      args[i] = val;
+      if (--remaining === 0) {
+        resolve(args);
+      }
+    }
+    for (var i = 0; i < args.length; i++) {
+      res(i, args[i]);
+    }
+  });
+};
+
+Promise.reject = function (value) {
+  return new Promise(function (resolve, reject) {
+    reject(value);
+  });
+};
+
+Promise.race = function (values) {
+  return new Promise(function (resolve, reject) {
+    values.forEach(function(value){
+      Promise.resolve(value).then(resolve, reject);
+    });
+  });
+};
+
+/* Prototype Methods */
+
+Promise.prototype['catch'] = function (onRejected) {
+  return this.then(null, onRejected);
+};
+
+},{"./core.js":491}],494:[function(require,module,exports){
+'use strict';
+
+var Promise = require('./core.js');
+
+module.exports = Promise;
+Promise.prototype['finally'] = function (f) {
+  return this.then(function (value) {
+    return Promise.resolve(f()).then(function () {
+      return value;
+    });
+  }, function (err) {
+    return Promise.resolve(f()).then(function () {
+      throw err;
+    });
+  });
+};
+
+},{"./core.js":491}],495:[function(require,module,exports){
+'use strict';
+
+module.exports = require('./core.js');
+require('./done.js');
+require('./finally.js');
+require('./es6-extensions.js');
+require('./node-extensions.js');
+require('./synchronous.js');
+
+},{"./core.js":491,"./done.js":492,"./es6-extensions.js":493,"./finally.js":494,"./node-extensions.js":496,"./synchronous.js":497}],496:[function(require,module,exports){
+'use strict';
+
+// This file contains then/promise specific extensions that are only useful
+// for node.js interop
+
+var Promise = require('./core.js');
+var asap = require('asap');
+
+module.exports = Promise;
+
+/* Static Functions */
+
+Promise.denodeify = function (fn, argumentCount) {
+  if (
+    typeof argumentCount === 'number' && argumentCount !== Infinity
+  ) {
+    return denodeifyWithCount(fn, argumentCount);
+  } else {
+    return denodeifyWithoutCount(fn);
+  }
+}
+
+var callbackFn = (
+  'function (err, res) {' +
+  'if (err) { rj(err); } else { rs(res); }' +
+  '}'
+);
+function denodeifyWithCount(fn, argumentCount) {
+  var args = [];
+  for (var i = 0; i < argumentCount; i++) {
+    args.push('a' + i);
+  }
+  var body = [
+    'return function (' + args.join(',') + ') {',
+    'var self = this;',
+    'return new Promise(function (rs, rj) {',
+    'var res = fn.call(',
+    ['self'].concat(args).concat([callbackFn]).join(','),
+    ');',
+    'if (res &&',
+    '(typeof res === "object" || typeof res === "function") &&',
+    'typeof res.then === "function"',
+    ') {rs(res);}',
+    '});',
+    '};'
+  ].join('');
+  return Function(['Promise', 'fn'], body)(Promise, fn);
+}
+function denodeifyWithoutCount(fn) {
+  var fnLength = Math.max(fn.length - 1, 3);
+  var args = [];
+  for (var i = 0; i < fnLength; i++) {
+    args.push('a' + i);
+  }
+  var body = [
+    'return function (' + args.join(',') + ') {',
+    'var self = this;',
+    'var args;',
+    'var argLength = arguments.length;',
+    'if (arguments.length > ' + fnLength + ') {',
+    'args = new Array(arguments.length + 1);',
+    'for (var i = 0; i < arguments.length; i++) {',
+    'args[i] = arguments[i];',
+    '}',
+    '}',
+    'return new Promise(function (rs, rj) {',
+    'var cb = ' + callbackFn + ';',
+    'var res;',
+    'switch (argLength) {',
+    args.concat(['extra']).map(function (_, index) {
+      return (
+        'case ' + (index) + ':' +
+        'res = fn.call(' + ['self'].concat(args.slice(0, index)).concat('cb').join(',') + ');' +
+        'break;'
+      );
+    }).join(''),
+    'default:',
+    'args[argLength] = cb;',
+    'res = fn.apply(self, args);',
+    '}',
+    
+    'if (res &&',
+    '(typeof res === "object" || typeof res === "function") &&',
+    'typeof res.then === "function"',
+    ') {rs(res);}',
+    '});',
+    '};'
+  ].join('');
+
+  return Function(
+    ['Promise', 'fn'],
+    body
+  )(Promise, fn);
+}
+
+Promise.nodeify = function (fn) {
+  return function () {
+    var args = Array.prototype.slice.call(arguments);
+    var callback =
+      typeof args[args.length - 1] === 'function' ? args.pop() : null;
+    var ctx = this;
+    try {
+      return fn.apply(this, arguments).nodeify(callback, ctx);
+    } catch (ex) {
+      if (callback === null || typeof callback == 'undefined') {
+        return new Promise(function (resolve, reject) {
+          reject(ex);
+        });
+      } else {
+        asap(function () {
+          callback.call(ctx, ex);
+        })
+      }
+    }
+  }
+}
+
+Promise.prototype.nodeify = function (callback, ctx) {
+  if (typeof callback != 'function') return this;
+
+  this.then(function (value) {
+    asap(function () {
+      callback.call(ctx, null, value);
+    });
+  }, function (err) {
+    asap(function () {
+      callback.call(ctx, err);
+    });
+  });
+}
+
+},{"./core.js":491,"asap":498}],497:[function(require,module,exports){
+'use strict';
+
+var Promise = require('./core.js');
+
+module.exports = Promise;
+Promise.enableSynchronous = function () {
+  Promise.prototype.isPending = function() {
+    return this.getState() == 0;
+  };
+
+  Promise.prototype.isFulfilled = function() {
+    return this.getState() == 1;
+  };
+
+  Promise.prototype.isRejected = function() {
+    return this.getState() == 2;
+  };
+
+  Promise.prototype.getValue = function () {
+    if (this._81 === 3) {
+      return this._65.getValue();
+    }
+
+    if (!this.isFulfilled()) {
+      throw new Error('Cannot get a value of an unfulfilled promise.');
+    }
+
+    return this._65;
+  };
+
+  Promise.prototype.getReason = function () {
+    if (this._81 === 3) {
+      return this._65.getReason();
+    }
+
+    if (!this.isRejected()) {
+      throw new Error('Cannot get a rejection reason of a non-rejected promise.');
+    }
+
+    return this._65;
+  };
+
+  Promise.prototype.getState = function () {
+    if (this._81 === 3) {
+      return this._65.getState();
+    }
+    if (this._81 === -1 || this._81 === -2) {
+      return 0;
+    }
+
+    return this._81;
+  };
+};
+
+Promise.disableSynchronous = function() {
+  Promise.prototype.isPending = undefined;
+  Promise.prototype.isFulfilled = undefined;
+  Promise.prototype.isRejected = undefined;
+  Promise.prototype.getValue = undefined;
+  Promise.prototype.getReason = undefined;
+  Promise.prototype.getState = undefined;
+};
+
+},{"./core.js":491}],498:[function(require,module,exports){
+"use strict";
+
+// rawAsap provides everything we need except exception management.
+var rawAsap = require("./raw");
+// RawTasks are recycled to reduce GC churn.
+var freeTasks = [];
+// We queue errors to ensure they are thrown in right order (FIFO).
+// Array-as-queue is good enough here, since we are just dealing with exceptions.
+var pendingErrors = [];
+var requestErrorThrow = rawAsap.makeRequestCallFromTimer(throwFirstError);
+
+function throwFirstError() {
+    if (pendingErrors.length) {
+        throw pendingErrors.shift();
+    }
+}
+
+/**
+ * Calls a task as soon as possible after returning, in its own event, with priority
+ * over other events like animation, reflow, and repaint. An error thrown from an
+ * event will not interrupt, nor even substantially slow down the processing of
+ * other events, but will be rather postponed to a lower priority event.
+ * @param {{call}} task A callable object, typically a function that takes no
+ * arguments.
+ */
+module.exports = asap;
+function asap(task) {
+    var rawTask;
+    if (freeTasks.length) {
+        rawTask = freeTasks.pop();
+    } else {
+        rawTask = new RawTask();
+    }
+    rawTask.task = task;
+    rawAsap(rawTask);
+}
+
+// We wrap tasks with recyclable task objects.  A task object implements
+// `call`, just like a function.
+function RawTask() {
+    this.task = null;
+}
+
+// The sole purpose of wrapping the task is to catch the exception and recycle
+// the task object after its single use.
+RawTask.prototype.call = function () {
+    try {
+        this.task.call();
+    } catch (error) {
+        if (asap.onerror) {
+            // This hook exists purely for testing purposes.
+            // Its name will be periodically randomized to break any code that
+            // depends on its existence.
+            asap.onerror(error);
+        } else {
+            // In a web browser, exceptions are not fatal. However, to avoid
+            // slowing down the queue of pending tasks, we rethrow the error in a
+            // lower priority turn.
+            pendingErrors.push(error);
+            requestErrorThrow();
+        }
+    } finally {
+        this.task = null;
+        freeTasks[freeTasks.length] = this;
+    }
+};
+
+},{"./raw":499}],499:[function(require,module,exports){
+(function (global){
+"use strict";
+
+// Use the fastest means possible to execute a task in its own turn, with
+// priority over other events including IO, animation, reflow, and redraw
+// events in browsers.
+//
+// An exception thrown by a task will permanently interrupt the processing of
+// subsequent tasks. The higher level `asap` function ensures that if an
+// exception is thrown by a task, that the task queue will continue flushing as
+// soon as possible, but if you use `rawAsap` directly, you are responsible to
+// either ensure that no exceptions are thrown from your task, or to manually
+// call `rawAsap.requestFlush` if an exception is thrown.
+module.exports = rawAsap;
+function rawAsap(task) {
+    if (!queue.length) {
+        requestFlush();
+        flushing = true;
+    }
+    // Equivalent to push, but avoids a function call.
+    queue[queue.length] = task;
+}
+
+var queue = [];
+// Once a flush has been requested, no further calls to `requestFlush` are
+// necessary until the next `flush` completes.
+var flushing = false;
+// `requestFlush` is an implementation-specific method that attempts to kick
+// off a `flush` event as quickly as possible. `flush` will attempt to exhaust
+// the event queue before yielding to the browser's own event loop.
+var requestFlush;
+// The position of the next task to execute in the task queue. This is
+// preserved between calls to `flush` so that it can be resumed if
+// a task throws an exception.
+var index = 0;
+// If a task schedules additional tasks recursively, the task queue can grow
+// unbounded. To prevent memory exhaustion, the task queue will periodically
+// truncate already-completed tasks.
+var capacity = 1024;
+
+// The flush function processes all tasks that have been scheduled with
+// `rawAsap` unless and until one of those tasks throws an exception.
+// If a task throws an exception, `flush` ensures that its state will remain
+// consistent and will resume where it left off when called again.
+// However, `flush` does not make any arrangements to be called again if an
+// exception is thrown.
+function flush() {
+    while (index < queue.length) {
+        var currentIndex = index;
+        // Advance the index before calling the task. This ensures that we will
+        // begin flushing on the next task the task throws an error.
+        index = index + 1;
+        queue[currentIndex].call();
+        // Prevent leaking memory for long chains of recursive calls to `asap`.
+        // If we call `asap` within tasks scheduled by `asap`, the queue will
+        // grow, but to avoid an O(n) walk for every task we execute, we don't
+        // shift tasks off the queue after they have been executed.
+        // Instead, we periodically shift 1024 tasks off the queue.
+        if (index > capacity) {
+            // Manually shift all values starting at the index back to the
+            // beginning of the queue.
+            for (var scan = 0, newLength = queue.length - index; scan < newLength; scan++) {
+                queue[scan] = queue[scan + index];
+            }
+            queue.length -= index;
+            index = 0;
+        }
+    }
+    queue.length = 0;
+    index = 0;
+    flushing = false;
+}
+
+// `requestFlush` is implemented using a strategy based on data collected from
+// every available SauceLabs Selenium web driver worker at time of writing.
+// https://docs.google.com/spreadsheets/d/1mG-5UYGup5qxGdEMWkhP6BWCz053NUb2E1QoUTU16uA/edit#gid=783724593
+
+// Safari 6 and 6.1 for desktop, iPad, and iPhone are the only browsers that
+// have WebKitMutationObserver but not un-prefixed MutationObserver.
+// Must use `global` instead of `window` to work in both frames and web
+// workers. `global` is a provision of Browserify, Mr, Mrs, or Mop.
+var BrowserMutationObserver = global.MutationObserver || global.WebKitMutationObserver;
+
+// MutationObservers are desirable because they have high priority and work
+// reliably everywhere they are implemented.
+// They are implemented in all modern browsers.
+//
+// - Android 4-4.3
+// - Chrome 26-34
+// - Firefox 14-29
+// - Internet Explorer 11
+// - iPad Safari 6-7.1
+// - iPhone Safari 7-7.1
+// - Safari 6-7
+if (typeof BrowserMutationObserver === "function") {
+    requestFlush = makeRequestCallFromMutationObserver(flush);
+
+// MessageChannels are desirable because they give direct access to the HTML
+// task queue, are implemented in Internet Explorer 10, Safari 5.0-1, and Opera
+// 11-12, and in web workers in many engines.
+// Although message channels yield to any queued rendering and IO tasks, they
+// would be better than imposing the 4ms delay of timers.
+// However, they do not work reliably in Internet Explorer or Safari.
+
+// Internet Explorer 10 is the only browser that has setImmediate but does
+// not have MutationObservers.
+// Although setImmediate yields to the browser's renderer, it would be
+// preferrable to falling back to setTimeout since it does not have
+// the minimum 4ms penalty.
+// Unfortunately there appears to be a bug in Internet Explorer 10 Mobile (and
+// Desktop to a lesser extent) that renders both setImmediate and
+// MessageChannel useless for the purposes of ASAP.
+// https://github.com/kriskowal/q/issues/396
+
+// Timers are implemented universally.
+// We fall back to timers in workers in most engines, and in foreground
+// contexts in the following browsers.
+// However, note that even this simple case requires nuances to operate in a
+// broad spectrum of browsers.
+//
+// - Firefox 3-13
+// - Internet Explorer 6-9
+// - iPad Safari 4.3
+// - Lynx 2.8.7
+} else {
+    requestFlush = makeRequestCallFromTimer(flush);
+}
+
+// `requestFlush` requests that the high priority event queue be flushed as
+// soon as possible.
+// This is useful to prevent an error thrown in a task from stalling the event
+// queue if the exception handled by Node.js’s
+// `process.on("uncaughtException")` or by a domain.
+rawAsap.requestFlush = requestFlush;
+
+// To request a high priority event, we induce a mutation observer by toggling
+// the text of a text node between "1" and "-1".
+function makeRequestCallFromMutationObserver(callback) {
+    var toggle = 1;
+    var observer = new BrowserMutationObserver(callback);
+    var node = document.createTextNode("");
+    observer.observe(node, {characterData: true});
+    return function requestCall() {
+        toggle = -toggle;
+        node.data = toggle;
+    };
+}
+
+// The message channel technique was discovered by Malte Ubl and was the
+// original foundation for this library.
+// http://www.nonblocking.io/2011/06/windownexttick.html
+
+// Safari 6.0.5 (at least) intermittently fails to create message ports on a
+// page's first load. Thankfully, this version of Safari supports
+// MutationObservers, so we don't need to fall back in that case.
+
+// function makeRequestCallFromMessageChannel(callback) {
+//     var channel = new MessageChannel();
+//     channel.port1.onmessage = callback;
+//     return function requestCall() {
+//         channel.port2.postMessage(0);
+//     };
+// }
+
+// For reasons explained above, we are also unable to use `setImmediate`
+// under any circumstances.
+// Even if we were, there is another bug in Internet Explorer 10.
+// It is not sufficient to assign `setImmediate` to `requestFlush` because
+// `setImmediate` must be called *by name* and therefore must be wrapped in a
+// closure.
+// Never forget.
+
+// function makeRequestCallFromSetImmediate(callback) {
+//     return function requestCall() {
+//         setImmediate(callback);
+//     };
+// }
+
+// Safari 6.0 has a problem where timers will get lost while the user is
+// scrolling. This problem does not impact ASAP because Safari 6.0 supports
+// mutation observers, so that implementation is used instead.
+// However, if we ever elect to use timers in Safari, the prevalent work-around
+// is to add a scroll event listener that calls for a flush.
+
+// `setTimeout` does not call the passed callback if the delay is less than
+// approximately 7 in web workers in Firefox 8 through 18, and sometimes not
+// even then.
+
+function makeRequestCallFromTimer(callback) {
+    return function requestCall() {
+        // We dispatch a timeout with a specified delay of 0 for engines that
+        // can reliably accommodate that request. This will usually be snapped
+        // to a 4 milisecond delay, but once we're flushing, there's no delay
+        // between events.
+        var timeoutHandle = setTimeout(handleTimer, 0);
+        // However, since this timer gets frequently dropped in Firefox
+        // workers, we enlist an interval handle that will try to fire
+        // an event 20 times per second until it succeeds.
+        var intervalHandle = setInterval(handleTimer, 50);
+
+        function handleTimer() {
+            // Whichever timer succeeds will cancel both timers and
+            // execute the callback.
+            clearTimeout(timeoutHandle);
+            clearInterval(intervalHandle);
+            callback();
+        }
+    };
+}
+
+// This is for `asap.js` only.
+// Its name will be periodically randomized to break any code that depends on
+// its existence.
+rawAsap.makeRequestCallFromTimer = makeRequestCallFromTimer;
+
+// ASAP was originally a nextTick shim included in Q. This was factored out
+// into this ASAP package. It was later adapted to RSVP which made further
+// amendments. These decisions, particularly to marginalize MessageChannel and
+// to capture the MutationObserver implementation in a closure, were integrated
+// back into ASAP proper.
+// https://github.com/tildeio/rsvp.js/blob/cddf7232546a9cf858524b75cde6f9edf72620a7/lib/rsvp/asap.js
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],500:[function(require,module,exports){
+var fromEnv = require('./lib/env');
+var fromFile = require('./lib/file');
+var LicenseList = require('./lib/license-list');
+var handlers = require('./lib/handlers');
+var home = require('user-home');
+var path = require('path');
+var appRoot = require('./lib/approot');
+var debug = require('debug')('strongloop-license');
+
+var licEnvVar = 'STRONGLOOP_LICENSE';
+var licFile = path.resolve(home || '',
+                           path.join('.strongloop', 'licenses.json'));
+
+var mainModule = appRoot(require.main);
+var appLicFile = path.join(mainModule.dir, 'licenses.json');
+debug('Application license file: %s', appLicFile);
+
+module.exports = exports = validate;
+exports.CONSOLE = handlers.CONSOLE;
+exports.EXIT = handlers.EXIT;
+exports.NOOP = handlers.NOOP;
+
+var loaders = [
+  function pkgLicenses() {
+    // Read licenses from STRONGLOOP_LICENSE property of package.json
+    var config = mainModule.package.config || {};
+    var licStr = (config.strongloop && config.strongloop.license) ||
+      config.strongLoopLicense ||
+      config.StrongLoopLicense || config.STRONGLOOP_LICENSE || '';
+    var parts = licStr.split(':');
+    var lics = parts.filter(Boolean);
+    debug('loaded %d licenses from package.json %s', lics.length, licStr);
+    return lics;
+  },
+  function appLicenses() {
+    return fromFile(appLicFile);
+  },
+  function envLicenses() {
+    return fromEnv(licEnvVar);
+  },
+  function fileLicenses() {
+    return fromFile(licFile);
+  },
+];
+
+function validate(opts, callback) {
+  opts = defaults(opts);
+  var result = false;
+  var licenses = new LicenseList(loaders);
+  result = licenses.first(opts.product, opts.feature, opts.now);
+  if (result) {
+    result.details.key = result.key;
+    result = result.details;
+  }
+  setImmediate(makeHandler(callback), null, opts.label, result);
+  return result;
+}
+
+function defaults(opts) {
+  if (typeof opts === 'string') {
+    // match "product[:feature[=label]]"
+    var parts = /^([^:=]+)(?::([^:=]+))?(?:=(.+))?$/.exec(opts);
+    opts = {
+      product: parts && parts[1],
+      feature: parts && parts[2],
+      label: parts && parts[3],
+    };
+  }
+  var defaultLabel = opts.feature ? [opts.product, opts.feature].join(':')
+                                  : opts.product;
+  return {
+    product: opts.product,
+    feature: opts.feature,
+    label: opts.label || defaultLabel,
+    now: opts.now || new Date(),
+    interval: opts.interval,
+  };
+}
+
+function makeHandler(fnOrName) {
+  if (typeof fnOrName === 'string') {
+    fnOrName = handlers[fnOrName.toUpperCase()];
+  }
+  if (typeof fnOrName !== 'function') {
+    fnOrName = handlers.CONSOLE;
+  }
+  return fnOrName;
+}
+
+},{"./lib/approot":501,"./lib/env":502,"./lib/file":503,"./lib/handlers":504,"./lib/license-list":505,"debug":417,"path":274,"user-home":510}],501:[function(require,module,exports){
+var fs = require('fs');
+var path = require('path');
+
+function find(pmodule, dir) {
+  if (!dir) {
+    dir = path.dirname(pmodule.filename);
+  }
+
+  var pkgFile = path.join(dir, 'package.json');
+
+  try {
+    var stats = fs.statSync(pkgFile);
+
+    if (stats.isFile()) {
+      return pkgFile;
+    }
+  } catch (err) {
+    // Ignore the err
+  }
+
+  if (dir === '/') {
+    throw new Error('Could not find package.json up from: ' + dir);
+  } else if (!dir || dir === '.') {
+    throw new Error('Cannot find package.json from unspecified directory');
+  }
+
+  return find(pmodule, path.dirname(dir));
+}
+
+function readRootPackage(pmodule) {
+  var pkg = find(pmodule);
+
+  var data = fs.readFileSync(pkg).toString();
+
+  return {
+    dir: path.dirname(pkg),
+    package: JSON.parse(data)
+  };
+}
+
+module.exports = readRootPackage;
+
+},{"fs":56,"path":274}],502:[function(require,module,exports){
+(function (process){
+var debug = require('debug')('strongloop-license:env');
+module.exports = envLicenses;
+
+// Read from named environment variable a list of ':' separated licenses:
+// "lic1:lic2:lic3"
+
+function envLicenses(envVar) {
+  var envStr = process.env[envVar] || '';
+  var parts = envStr.split(':');
+  var lics = parts.filter(blank);
+  debug('loaded %d licenses from env var %s', lics.length, envVar);
+  return lics;
+
+  function blank(str) {
+    return !!str;
+  }
+}
+
+}).call(this,require('_process'))
+},{"_process":279,"debug":417}],503:[function(require,module,exports){
+var debug = require('debug')('strongloop-license:file');
+var fs = require('fs');
+
+module.exports = fileLicenses;
+
+// path of JSON file containing:
+// [ { licenseKey: 'lic', ...}, ... ]
+
+function fileLicenses(path) {
+  var lics = safeChain(path, fs.readFileSync, JSON.parse, extractLics);
+  lics = lics || [];
+  debug('loaded %d licenses from %s', lics.length, path);
+  return lics;
+
+  function extractLics(subs) {
+    var licenses = subs.licenses || subs;
+    if (!Array.isArray(licenses)) {
+      throw new Error('Invalid licenses: ' + subs);
+    }
+    return licenses.map(function(sub) {
+      return sub.licenseKey;
+    }).filter(blank);
+  }
+
+  function blank(str) {
+    return !!str;
+  }
+}
+
+function safeChain(init, fns) {
+  fns = [].slice.call(arguments, 1);
+  return fns.reduce(attempt, init);
+
+  function attempt(prev, fn) {
+    try {
+      return fn(prev);
+    } catch (e) {
+      return null;
+    }
+  }
+}
+
+},{"debug":417,"fs":56}],504:[function(require,module,exports){
+(function (process){
+exports.CONSOLE = logIfFailure;
+exports.EXIT = exitIfFailure;
+exports.NOOP = noop;
+
+// Handlers are given:
+//  err: null or Error
+//  req: "product:feature" or "product" used in license requirement
+//  res: true if any license met the requirements
+
+function noop() {}
+
+function exitIfFailure(err, req, res) {
+  logIfFailure(err, req, res);
+  if (err || !res) {
+    console.error('##  Terminating process.');
+    // Delay actual exit in case stderr is non-blocking
+    setTimeout(exit, 50);
+    function exit() {
+      process.exit(1);
+    }
+  }
+}
+
+function logIfFailure(err, req, res) {
+  if (err || !res) {
+    console.error('## %s licensing missing or invalid. Please verify your ' +
+                  'licenses in the Licenses page by running StrongLoop Arc ' +
+                  'by typing "slc arc --licenses" . If you have questions ' +
+                  'about your license or StrongLoop licensing please ' +
+                  'contact sales@strongloop.com.', req);
+  } else {
+    console.log('## %s is licensed from %s to %s.', req,
+                res.activationDate.toISOString(),
+                res.expirationDate.toISOString());
+  }
+}
+
+}).call(this,require('_process'))
+},{"_process":279}],505:[function(require,module,exports){
+var License = require('strong-license');
+var debug = require('debug')('strongloop-license:list');
+
+module.exports = exports = LicenseList;
+
+// Simple wrapper for loading a list of licenses and performing checks on them
+
+function LicenseList(loaders) {
+  if (!(this instanceof LicenseList)) {
+    return new LicenseList(loaders);
+  }
+  this.loaders = [].concat(loaders || []);
+  this.licenses = [];
+  this.reload();
+}
+
+LicenseList.prototype.add = function add(lic) {
+  var decodedLicense = new License(lic, 'c374fa24098c7eb64a73dc05c428be40');
+  debug('loaded license %j', decodedLicense);
+  this.licenses.push(decodedLicense);
+};
+
+LicenseList.prototype.any = function any(product, feature, now) {
+  debug('validating license for %s:%s@%j', product, feature, now);
+  var result = this.licenses.some(covers);
+  debug('result: %j', result);
+  return result;
+
+  function covers(lic) {
+    debug('testing against %j', lic);
+    return lic.covers(product, feature, now);
+  }
+};
+
+LicenseList.prototype.first = function any(product, feature, now) {
+  debug('validating license for %s:%s@%j', product, feature, now);
+  var result = this.licenses.reduce(covers, false);
+  debug('result: %j', result);
+  return result;
+
+  function covers(match, lic) {
+    if (match) {
+      return match;
+    } else {
+      debug('testing against %j', lic);
+      return lic.covers(product, feature, now) && lic;
+    }
+  }
+};
+
+LicenseList.prototype.reload = function reload() {
+  var self = this;
+  debug('reloading licenses');
+  this.loaders.forEach(function(loader) {
+    loader().forEach(self.add, self);
+  });
+};
+
+},{"debug":417,"strong-license":506}],506:[function(require,module,exports){
+(function (process){
+var License = require('./lib/license');
+
+// TODO: remove top level exports in 2.x
+module.exports = License;
+module.exports.License = License;
+
+// If run directly, parse each argument as a license and dump its contents
+if (module === require.main) {
+  process.argv.slice(2).forEach(function(k) {
+    console.log('%j', new License(k));
+  });
+}
+
+}).call(this,require('_process'))
+},{"./lib/license":507,"_process":279}],507:[function(require,module,exports){
+(function (process){
+var fmt = require('util').format;
+var jwt = require('jwt-simple');
+
+module.exports = License;
+
+License.defaultSecret = 'strong-license';
+License.defaultAlgorithm = 'HS256';
+
+/**
+ * License extends the JWT (JSON Web Token) format by adding additional fields,
+ * defining a wildcard semantic for some fields, defining semantics for
+ * validation against a query.
+ * @class
+ * @param {(string|Object)} input Encoded license string or license description object
+ * @param {string} [secret] Secret to use for encoding/decoding the license
+ * @param {string} [algorithm] Algorithm to encode/decode with
+ */
+function License(input, secret, algorithm) {
+  if (!(this instanceof License))
+    return new License(key);
+
+  secret = secret || License.defaultSecret;
+  algorithm = algorithm || License.defaultAlgorithm;
+
+  if (typeof input === 'string' || input instanceof String) {
+    this.key = input;
+    this.details = normalized(safeDecode(input, secret));
+  } else {
+    input = input || {};
+    this.details = normalized(input);
+    this.key = jwt.encode(this.details, secret, algorithm);
+  }
+}
+
+License.prototype.export = function LicenseExport(secret, algorithm) {
+  secret = secret || License.defaultSecret;
+  algorithm = algorithm || License.defaultAlgorithm;
+  return jwt.encode(this.details, secret, algorithm);
+};
+
+/**
+ * @returns {Object} decoded object to stringify when serializing to JSON
+ */
+License.prototype.toJSON = function LicenseToJSON() {
+  return this.details;
+};
+
+/**
+ * @returns {string} decoded single-line string representation of a License
+ */
+License.prototype.toString = function LicenseToString() {
+  var lic = this.details;
+  return fmt('License(email: %s, prod: %s, feat: %s, start: %s, end: %s)',
+             lic.email, lic.product, lic.features.join(','),
+             lic.activationDate, lic.expirationDate);
+};
+
+/**
+ * Licenses define a combination of product and features and the period of
+ * time that the product and features are licensed for.
+ * Parameters that are not given (or are otherwise falsey) do not have
+ * requirements, so they always pass. If no arguments are given, then all
+ * of the requirements are met and the scenario is considered "covered".
+ * @param {string} [product] Product string to query license for
+ * @param {string} [features] Feature string to query license for
+ * @param {Date} [when] Point in time to test license against
+ * @returns {Boolean} Whether the license covers the specified product,
+ *                    feature, and time.
+ */
+License.prototype.covers = function LicenseCovers(product, feature, when) {
+  return (this.coversProduct(product)
+          && this.coversFeature(feature)
+          && this.coversDate(when));
+};
+
+/**
+ * @param {string} [query] product string to test for
+ * @returns {Boolean} true if query is falsey, identical to the product string
+ *                    in the license, or if the product in the license is '*'.
+ */
+License.prototype.coversProduct = function LicenseCoversProduct(query) {
+  return match(this.details.product, query);
+};
+
+/**
+ * @param {string} [query] feature string to test for
+ * @returns {Boolean} true if query is falsey, identical any string in the
+ *                    license's feature list, or if the license's feature list
+ *                    contains a '*'.
+ */
+License.prototype.coversFeature = function LicenseCoversFeature(query) {
+  return !query || this.details.features.some(function(enabled) {
+    return match(enabled, query);
+  });
+};
+
+/**
+ * @param {Date} [when] point in time to test activation/expiration against
+ * @returns {Boolean} true if when is falsey, or if it is between the
+ *                    activationDate and expirationDate in the license.
+ */
+License.prototype.coversDate = function LicenseCoversDate(when) {
+  var lic = this.details;
+  return !when || (lic.activationDate < when && lic.expirationDate > when);
+};
+
+// 'foo' matches 'foo'
+// * matches anything
+// falsey query is matched by anything
+function match(pattern, query) {
+  var result = !query || pattern === '*' || pattern === query;
+  return result;
+}
+
+// Normalize input fields, defaulting to "invalid" or "expired" state where
+// details are missing.
+function normalized(input) {
+  var l = JSON.parse(JSON.stringify(input));
+  l.userId = l.userId || null;
+  l.email = l.email || null;
+  l.product = l.product || null;
+  if (l.product !== null) {
+    l.product = String(l.product);
+  }
+  l.features = l.features || [];
+  if (typeof l.features === 'string') {
+    // split on , and :
+    l.features = l.features.split(/(?:,|:)/);
+  } else if (!Array.isArray(l.features)) {
+    l.features = [];
+  }
+  if (l.feature) {
+    l.features.push(l.feature)
+  }
+  l.features = l.features.map(function(f) {
+    return f.trim();
+  }).filter(function(f) {
+    return !!f;
+  });
+  l.activationDate = new Date(l.activationDate || 0);
+  l.expirationDate = new Date(l.expirationDate || 0);
+  return l;
+}
+
+function safeDecode(input, secret, algorithm) {
+  try {
+    return normalized(jwt.decode(input, secret, algorithm));
+  } catch (e) {
+    return normalized({});
+  }
+}
+
+// If run directly, parse each argument as a license and dump its contents
+if (module === require.main) {
+  process.argv.slice(2).forEach(function(k) {
+    console.log('%j', new License(k));
+  });
+}
+
+}).call(this,require('_process'))
+},{"_process":279,"jwt-simple":508,"util":396}],508:[function(require,module,exports){
+module.exports = require('./lib/jwt');
+
+},{"./lib/jwt":509}],509:[function(require,module,exports){
+(function (Buffer){
+/*
+ * jwt-simple
+ *
+ * JSON Web Token encode and decode module for node.js
+ *
+ * Copyright(c) 2011 Kazuhito Hokamura
+ * MIT Licensed
+ */
+
+/**
+ * module dependencies
+ */
+var crypto = require('crypto');
+
+
+/**
+ * support algorithm mapping
+ */
+var algorithmMap = {
+  HS256: 'sha256',
+  HS384: 'sha384',
+  HS512: 'sha512',
+  RS256: 'RSA-SHA256'
+};
+
+/**
+ * Map algorithm to hmac or sign type, to determine which crypto function to use
+ */
+var typeMap = {
+  HS256: 'hmac',
+  HS384: 'hmac',
+  HS512: 'hmac',
+  RS256: 'sign'
+};
+
+
+/**
+ * expose object
+ */
+var jwt = module.exports;
+
+
+/**
+ * version
+ */
+jwt.version = '0.2.0';
+
+/**
+ * Decode jwt 
+ *
+ * @param {Object} token
+ * @param {String} key 
+ * @param {Boolean} noVerify 
+ * @return {Object} payload
+ * @api public
+ */
+jwt.decode = function jwt_decode(token, key, noVerify) {
+  // check seguments
+  var segments = token.split('.');
+  if (segments.length !== 3) {
+    throw new Error('Not enough or too many segments');
+  }
+
+  // All segment should be base64
+  var headerSeg = segments[0];
+  var payloadSeg = segments[1];
+  var signatureSeg = segments[2];
+
+  // base64 decode and parse JSON
+  var header = JSON.parse(base64urlDecode(headerSeg));
+  var payload = JSON.parse(base64urlDecode(payloadSeg));
+
+  if (!noVerify) {
+    var signingMethod = algorithmMap[header.alg];
+    var signingType = typeMap[header.alg];
+    if (!signingMethod || !signingType) {
+      throw new Error('Algorithm not supported');
+    }
+  
+    // verify signature. `sign` will return base64 string.
+    var signingInput = [headerSeg, payloadSeg].join('.');
+    if (!verify(signingInput, key, signingMethod, signingType, signatureSeg)) {
+      throw new Error('Signature verification failed');
+    }
+  }
+
+  return payload;
+};
+
+
+/**
+ * Encode jwt
+ *
+ * @param {Object} payload
+ * @param {String} key 
+ * @param {String} algorithm 
+ * @return {String} token
+ * @api public
+ */
+jwt.encode = function jwt_encode(payload, key, algorithm) {
+  // Check key
+  if (!key) {
+    throw new Error('Require key');
+  }
+
+  // Check algorithm, default is HS256
+  if (!algorithm) {
+    algorithm = 'HS256';
+  }
+
+  var signingMethod = algorithmMap[algorithm];
+  var signingType = typeMap[algorithm];
+  if (!signingMethod || !signingType) {
+    throw new Error('Algorithm not supported');
+  }
+
+  // header, typ is fixed value.
+  var header = { typ: 'JWT', alg: algorithm };
+
+  // create segments, all segment should be base64 string
+  var segments = [];
+  segments.push(base64urlEncode(JSON.stringify(header)));
+  segments.push(base64urlEncode(JSON.stringify(payload)));
+  segments.push(sign(segments.join('.'), key, signingMethod, signingType));
+  
+  return segments.join('.');
+}
+
+
+/**
+ * private util functions
+ */
+
+function verify(input, key, method, type, signature) {
+  if(type === "hmac") {
+    return (signature === sign(input, key, method, type));
+  }
+  else if(type == "sign") {
+    return crypto.createVerify(method)
+                 .update(input)
+                 .verify(key, base64urlUnescape(signature), 'base64');
+  }
+  else {
+    throw new Error('Algorithm type not recognized');
+  }
+}
+
+function sign(input, key, method, type) {
+  var base64str;
+  if(type === "hmac") {
+    base64str = crypto.createHmac(method, key).update(input).digest('base64');
+  }
+  else if(type == "sign") {
+    base64str = crypto.createSign(method).update(input).sign(key, 'base64');
+  }
+  else {
+    throw new Error('Algorithm type not recognized');
+  }
+
+  return base64urlEscape(base64str);
+}
+
+function base64urlDecode(str) {
+  return new Buffer(base64urlUnescape(str), 'base64').toString();
+}
+
+function base64urlUnescape(str) {
+  str += Array(5 - str.length % 4).join('=');
+  return str.replace(/\-/g, '+').replace(/_/g, '/');
+}
+
+function base64urlEncode(str) {
+  return base64urlEscape(new Buffer(str).toString('base64'));
+}
+
+function base64urlEscape(str) {
+  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+}).call(this,require("buffer").Buffer)
+},{"buffer":58,"crypto":72}],510:[function(require,module,exports){
+(function (process){
+'use strict';
+var env = process.env;
+var home = env.HOME;
+var user = env.LOGNAME || env.USER || env.LNAME || env.USERNAME;
+
+if (process.platform === 'win32') {
+	module.exports = env.USERPROFILE || env.HOMEDRIVE + env.HOMEPATH || home || null;
+} else if (process.platform === 'darwin') {
+	module.exports = home || (user ? '/Users/' + user : null) || null;
+} else if (process.platform === 'linux') {
+	module.exports = home ||
+		(user ? (process.getuid() === 0 ? '/root' : '/home/' + user) : null) || null;
+} else {
+	module.exports = home || null;
+}
+
+}).call(this,require('_process'))
+},{"_process":279}],511:[function(require,module,exports){
 arguments[4][176][0].apply(exports,arguments)
-},{"./lib/remote-connector":480,"dup":176}],479:[function(require,module,exports){
+},{"./lib/remote-connector":513,"dup":176}],512:[function(require,module,exports){
 /*!
  * Dependencies
  */
@@ -100750,7 +106472,7 @@ function defineRelationProperty(modelClass, def) {
     }
   });
 }
-},{"loopback-datasource-juggler/lib/relation-definition":504}],480:[function(require,module,exports){
+},{"loopback-datasource-juggler/lib/relation-definition":537}],513:[function(require,module,exports){
 (function (process){
 /**
  * Dependencies.
@@ -100855,79 +106577,1015 @@ function noop() {
 }
 
 }).call(this,require('_process'))
-},{"./relations":479,"_process":279,"assert":22,"loopback-datasource-juggler/lib/jutil":497,"strong-remoting":612}],481:[function(require,module,exports){
+},{"./relations":512,"_process":279,"assert":22,"loopback-datasource-juggler/lib/jutil":530,"strong-remoting":645}],514:[function(require,module,exports){
 arguments[4][179][0].apply(exports,arguments)
-},{"./lib/connector":482,"./lib/sql":484,"./lib/transaction":485,"dup":179}],482:[function(require,module,exports){
+},{"./lib/connector":515,"./lib/sql":517,"./lib/transaction":518,"dup":179}],515:[function(require,module,exports){
 arguments[4][180][0].apply(exports,arguments)
-},{"_process":279,"debug":416,"dup":180}],483:[function(require,module,exports){
+},{"_process":279,"debug":417,"dup":180}],516:[function(require,module,exports){
 arguments[4][181][0].apply(exports,arguments)
-},{"assert":22,"dup":181}],484:[function(require,module,exports){
+},{"assert":22,"dup":181}],517:[function(require,module,exports){
 arguments[4][182][0].apply(exports,arguments)
-},{"./connector":482,"./parameterized-sql":483,"./transaction":485,"_process":279,"assert":22,"async":486,"debug":416,"dup":182,"util":396}],485:[function(require,module,exports){
+},{"./connector":515,"./parameterized-sql":516,"./transaction":518,"_process":279,"assert":22,"async":519,"debug":417,"dup":182,"util":396}],518:[function(require,module,exports){
 arguments[4][183][0].apply(exports,arguments)
-},{"assert":22,"debug":416,"dup":183,"events":111,"util":396}],486:[function(require,module,exports){
+},{"assert":22,"debug":417,"dup":183,"events":111,"util":396}],519:[function(require,module,exports){
 arguments[4][184][0].apply(exports,arguments)
-},{"_process":279,"dup":184}],487:[function(require,module,exports){
+},{"_process":279,"dup":184}],520:[function(require,module,exports){
 arguments[4][185][0].apply(exports,arguments)
-},{"./lib/datasource.js":491,"./lib/geo.js":492,"./lib/model-builder.js":500,"./lib/model.js":502,"./lib/validations.js":510,"./package.json":517,"dup":185,"loopback-connector":481}],488:[function(require,module,exports){
+},{"./lib/datasource.js":524,"./lib/geo.js":525,"./lib/model-builder.js":533,"./lib/model.js":535,"./lib/validations.js":543,"./package.json":550,"dup":185,"loopback-connector":514}],521:[function(require,module,exports){
 arguments[4][186][0].apply(exports,arguments)
-},{"_process":279,"dup":186}],489:[function(require,module,exports){
+},{"_process":279,"dup":186}],522:[function(require,module,exports){
 arguments[4][187][0].apply(exports,arguments)
-},{"../geo":492,"../utils":509,"_process":279,"async":511,"dup":187,"fs":56,"loopback-connector":481,"util":396}],490:[function(require,module,exports){
+},{"../geo":525,"../utils":542,"_process":279,"async":544,"dup":187,"fs":56,"loopback-connector":514,"util":396}],523:[function(require,module,exports){
 arguments[4][188][0].apply(exports,arguments)
-},{"./connectors/memory":489,"./geo":492,"./include.js":494,"./jutil":497,"./list.js":498,"./model":502,"./relations.js":505,"./scope.js":506,"./transaction":507,"./utils":509,"./validations":510,"_process":279,"assert":22,"async":511,"debug":416,"dup":188,"util":396}],491:[function(require,module,exports){
+},{"./connectors/memory":522,"./geo":525,"./include.js":527,"./jutil":530,"./list.js":531,"./model":535,"./relations.js":538,"./scope.js":539,"./transaction":540,"./utils":542,"./validations":543,"_process":279,"assert":22,"async":544,"debug":417,"dup":188,"util":396}],524:[function(require,module,exports){
 arguments[4][189][0].apply(exports,arguments)
-},{"./dao.js":490,"./jutil":497,"./model-builder.js":500,"./model-definition.js":501,"./model.js":502,"./observer":503,"./relation-definition.js":504,"./scope.js":506,"./utils":509,"_process":279,"assert":22,"async":511,"debug":416,"dup":189,"events":111,"traverse":634,"util":396}],492:[function(require,module,exports){
+},{"./dao.js":523,"./jutil":530,"./model-builder.js":533,"./model-definition.js":534,"./model.js":535,"./observer":536,"./relation-definition.js":537,"./scope.js":539,"./utils":542,"_process":279,"assert":22,"async":544,"debug":417,"dup":189,"events":111,"traverse":667,"util":396}],525:[function(require,module,exports){
 arguments[4][190][0].apply(exports,arguments)
-},{"assert":22,"dup":190}],493:[function(require,module,exports){
+},{"assert":22,"dup":190}],526:[function(require,module,exports){
 arguments[4][191][0].apply(exports,arguments)
-},{"depd":488,"dup":191}],494:[function(require,module,exports){
-arguments[4][192][0].apply(exports,arguments)
-},{"./include_utils":495,"./list":498,"./utils":509,"_process":279,"async":511,"dup":192}],495:[function(require,module,exports){
+},{"depd":521,"dup":191}],527:[function(require,module,exports){
+(function (process){
+var async = require('async');
+var utils = require('./utils');
+var List = require('./list');
+var includeUtils = require('./include_utils');
+var isPlainObject = utils.isPlainObject;
+var defineCachedRelations = utils.defineCachedRelations;
+var uniq = utils.uniq;
+
+/*!
+ * Normalize the include to be an array
+ * @param include
+ * @returns {*}
+ */
+function normalizeInclude(include) {
+  var newInclude;
+  if (typeof include === 'string') {
+    return [include];
+  } else if (isPlainObject(include)) {
+    // Build an array of key/value pairs
+    newInclude = [];
+    var rel = include.rel || include.relation;
+    var obj = {};
+    if (typeof rel === 'string') {
+      obj[rel] = new IncludeScope(include.scope);
+      newInclude.push(obj);
+    } else {
+      for (var key in include) {
+        obj[key] = include[key];
+        newInclude.push(obj);
+      }
+    }
+    return newInclude;
+  } else if (Array.isArray(include)) {
+    newInclude = [];
+    for (var i = 0, n = include.length; i < n; i++) {
+      var subIncludes = normalizeInclude(include[i]);
+      newInclude = newInclude.concat(subIncludes);
+    }
+    return newInclude;
+  } else {
+    return include;
+  }
+}
+
+function IncludeScope(scope) {
+  this._scope = utils.deepMerge({}, scope || {});
+  if (this._scope.include) {
+    this._include = normalizeInclude(this._scope.include);
+    delete this._scope.include;
+  } else {
+    this._include = null;
+  }
+};
+
+IncludeScope.prototype.conditions = function() {
+  return utils.deepMerge({}, this._scope);
+};
+
+IncludeScope.prototype.include = function() {
+  return this._include;
+};
+
+/**
+ * Find the idKey of a Model.
+ * @param {ModelConstructor} m - Model Constructor
+ * @returns {String}
+ */
+function idName(m) {
+  return m.definition.idName() || 'id';
+}
+
+/*!
+ * Look up a model by name from the list of given models
+ * @param {Object} models Models keyed by name
+ * @param {String} modelName The model name
+ * @returns {*} The matching model class
+ */
+function lookupModel(models, modelName) {
+  if (models[modelName]) {
+    return models[modelName];
+  }
+  var lookupClassName = modelName.toLowerCase();
+  for (var name in models) {
+    if (name.toLowerCase() === lookupClassName) {
+      return models[name];
+    }
+  }
+}
+
+/**
+ * Utility Function to allow interleave before and after high computation tasks
+ * @param tasks
+ * @param callback
+ */
+function execTasksWithInterLeave(tasks, callback) {
+  //let's give others some time to process.
+  //Context Switch BEFORE Heavy Computation
+  process.nextTick(function () {
+    //Heavy Computation
+    async.parallel(tasks, function (err, info) {
+      //Context Switch AFTER Heavy Computation
+      process.nextTick(function () {
+        callback(err, info);
+      });
+    });
+  });
+}
+
+/*!
+ * Include mixin for ./model.js
+ */
+module.exports = Inclusion;
+
+/**
+ * Inclusion - Model mixin.
+ *
+ * @class
+ */
+
+function Inclusion() {
+}
+
+/**
+ * Normalize includes - used in DataAccessObject
+ *
+ */
+
+Inclusion.normalizeInclude = normalizeInclude;
+
+/**
+ * Enables you to load relations of several objects and optimize numbers of requests.
+ *
+ * Examples:
+ *
+ * Load all users' posts with only one additional request:
+ * `User.include(users, 'posts', function() {});`
+ * Or
+ * `User.include(users, ['posts'], function() {});`
+ *
+ * Load all users posts and passports with two additional requests:
+ * `User.include(users, ['posts', 'passports'], function() {});`
+ *
+ * Load all passports owner (users), and all posts of each owner loaded:
+ *```Passport.include(passports, {owner: 'posts'}, function() {});
+ *``` Passport.include(passports, {owner: ['posts', 'passports']});
+ *``` Passport.include(passports, {owner: [{posts: 'images'}, 'passports']});
+ *
+ * @param {Array} objects Array of instances
+ * @param {String|Object|Array} include Which relations to load.
+ * @param {Object} [options] Options for CRUD
+ * @param {Function} cb Callback called when relations are loaded
+ *
+ */
+Inclusion.include = function (objects, include, options, cb) {
+  if (typeof options === 'function' && cb === undefined) {
+    cb = options;
+    options = {};
+  }
+  var self = this;
+
+  if (!include || (Array.isArray(include) && include.length === 0) ||
+      (Array.isArray(objects) && objects.length === 0) ||
+      (isPlainObject(include) && Object.keys(include).length === 0)) {
+    // The objects are empty
+    return process.nextTick(function() {
+      cb && cb(null, objects);
+    });
+  }
+
+  include = normalizeInclude(include);
+
+  async.each(include, function(item, callback) {
+    processIncludeItem(objects, item, options, callback);
+  }, function(err) {
+    cb && cb(err, objects);
+  });
+
+  function processIncludeItem(objs, include, options, cb) {
+    var relations = self.relations;
+
+    var relationName;
+    var subInclude = null, scope = null;
+
+    if (isPlainObject(include)) {
+      relationName = Object.keys(include)[0];
+      if (include[relationName] instanceof IncludeScope) {
+        scope = include[relationName];
+        subInclude = scope.include();
+      } else {
+        subInclude = include[relationName];
+        //when include = {user:true}, it does not have subInclude
+        if (subInclude === true) {
+          subInclude = null;
+        }
+      }
+    }
+    else {
+      relationName = include;
+      subInclude = null;
+    }
+
+    var relation = relations[relationName];
+    if (!relation) {
+      cb(new Error('Relation "' + relationName + '" is not defined for '
+        + self.modelName + ' model'));
+      return;
+    }
+    var polymorphic = relation.polymorphic;
+    //if (polymorphic && !polymorphic.discriminator) {
+    //  cb(new Error('Relation "' + relationName + '" is polymorphic but ' +
+    //    'discriminator is not present'));
+    //  return;
+    //}
+    if (!relation.modelTo) {
+      if (!relation.polymorphic) {
+        cb(new Error('Relation.modelTo is not defined for relation' +
+          relationName + ' and is no polymorphic'));
+        return;
+      }
+    }
+
+    // Just skip if inclusion is disabled
+    if (relation.options.disableInclude) {
+      return cb();
+    }
+    //prepare filter and fields for making DB Call
+    var filter = (scope && scope.conditions()) || {};
+    if ((relation.multiple || relation.type === 'belongsTo') && scope) {
+      var includeScope = {};
+      // make sure not to miss any fields for sub includes
+      if (filter.fields && Array.isArray(subInclude) &&
+        relation.modelTo.relations) {
+        includeScope.fields = [];
+        subInclude.forEach(function (name) {
+          var rel = relation.modelTo.relations[name];
+          if (rel && rel.type === 'belongsTo') {
+            includeScope.fields.push(rel.keyFrom);
+          }
+        });
+      }
+      utils.mergeQuery(filter, includeScope, {fields: false});
+    }
+    //Let's add a placeholder where query
+    filter.where = filter.where || {};
+    //if fields are specified, make sure target foreign key is present
+    var fields = filter.fields;
+    if (Array.isArray(fields) && fields.indexOf(relation.keyTo) === -1) {
+      fields.push(relation.keyTo);
+    }
+    else if (isPlainObject(fields) && !fields[relation.keyTo]) {
+      fields[relation.keyTo] = true;
+    }
+
+    /**
+     * call relation specific include functions
+     */
+    if (relation.multiple) {
+      if (relation.modelThrough) {
+        //hasManyThrough needs separate handling
+        return includeHasManyThrough(cb);
+      }
+      //This will also include embedsMany with belongsTo.
+      //Might need to optimize db calls for this.
+      if (relation.type === 'embedsMany') {
+        //embedded docs are part of the objects, no need to make db call.
+        //proceed as implemented earlier.
+        return includeEmbeds(cb);
+      }
+      if (relation.type === 'referencesMany') {
+        return includeReferencesMany(cb);
+      }
+
+      //This handles exactly hasMany. Fast and straightforward. Without parallel, each and other boilerplate.
+      if(relation.type === 'hasMany' && relation.multiple && !subInclude){
+        return includeHasManySimple(cb);
+      }
+      //assuming all other relations with multiple=true as hasMany
+      return includeHasMany(cb);
+    }
+    else {
+      if (polymorphic) {
+        if (relation.type === 'hasOne') {
+          return includePolymorphicHasOne(cb);
+        }
+        return includePolymorphicBelongsTo(cb);
+      }
+      if (relation.type === 'embedsOne') {
+        return includeEmbeds(cb);
+      }
+      //hasOne or belongsTo
+      return includeOneToOne(cb);
+    }
+
+    /**
+     * Handle inclusion of HasManyThrough/HasAndBelongsToMany/Polymorphic
+     * HasManyThrough relations
+     * @param callback
+     */
+    function includeHasManyThrough(callback) {
+      var sourceIds = [];
+      //Map for Indexing objects by their id for faster retrieval
+      var objIdMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        // one-to-many: foreign key reference is modelTo -> modelFrom.
+        // use modelFrom.keyFrom in where filter later
+        var sourceId = obj[relation.keyFrom];
+        if (sourceId) {
+          sourceIds.push(sourceId);
+          objIdMap[sourceId.toString()] = obj;
+        }
+        // sourceId can be null. but cache empty data as result
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = [];
+      }
+      //default filters are not applicable on through model. should be applied
+      //on modelTo later in 2nd DB call.
+      var throughFilter = {
+        where: {}
+      };
+      throughFilter.where[relation.keyTo] = {
+        inq: uniq(sourceIds)
+      };
+      if (polymorphic) {
+        //handle polymorphic hasMany (reverse) in which case we need to filter
+        //by discriminator to filter other types
+        throughFilter.where[polymorphic.discriminator] =
+          relation.modelFrom.definition.name;
+      }
+      /**
+       * 1st DB Call of 2 step process. Get through model objects first
+       */
+      relation.modelThrough.find(throughFilter, options, throughFetchHandler);
+      /**
+       * Handle the results of Through model objects and fetch the modelTo items
+       * @param err
+       * @param {Array<Model>} throughObjs
+       * @returns {*}
+       */
+      function throughFetchHandler(err, throughObjs) {
+        if (err) {
+          return callback(err);
+        }
+        // start preparing for 2nd DB call.
+        var targetIds = [];
+        var targetObjsMap = {};
+        for (var i = 0; i < throughObjs.length; i++) {
+          var throughObj = throughObjs[i];
+          var targetId = throughObj[relation.keyThrough];
+          if (targetId) {
+            //save targetIds for 2nd DB Call
+            targetIds.push(targetId);
+            var sourceObj = objIdMap[throughObj[relation.keyTo]];
+            var targetIdStr = targetId.toString();
+            //Since targetId can be duplicates, multiple source objs are put
+            //into buckets.
+            var objList = targetObjsMap[targetIdStr] =
+              targetObjsMap[targetIdStr] || [];
+            objList.push(sourceObj);
+          }
+        }
+        //Polymorphic relation does not have idKey of modelTo. Find it manually
+        var modelToIdName = idName(relation.modelTo);
+        filter.where[modelToIdName] = {
+          inq: uniq(targetIds)
+        };
+
+        //make sure that the modelToIdName is included if fields are specified
+        if (Array.isArray(fields) && fields.indexOf(modelToIdName) === -1) {
+          fields.push(modelToIdName);
+        }
+        else if (isPlainObject(fields) && !fields[modelToIdName]) {
+          fields[modelToIdName] = true;
+        }
+
+        /**
+         * 2nd DB Call of 2 step process. Get modelTo (target) objects
+         */
+        relation.modelTo.find(filter, options, targetsFetchHandler);
+        function targetsFetchHandler(err, targets) {
+          if (err) {
+            return callback(err);
+          }
+          var tasks = [];
+          //simultaneously process subIncludes. Call it first as it is an async
+          //process.
+          if (subInclude && targets) {
+            tasks.push(function subIncludesTask(next) {
+              relation.modelTo.include(targets, subInclude, options, next);
+            });
+          }
+          //process & link each target with object
+          tasks.push(targetLinkingTask);
+          function targetLinkingTask(next) {
+            async.each(targets, linkManyToMany, next);
+            function linkManyToMany(target, next) {
+              var targetId = target[modelToIdName];
+              var objList = targetObjsMap[targetId.toString()];
+              async.each(objList, function (obj, next) {
+                if (!obj) return next();
+                obj.__cachedRelations[relationName].push(target);
+                processTargetObj(obj, next);
+              }, next);
+            }
+          }
+
+          execTasksWithInterLeave(tasks, callback);
+        }
+      }
+    }
+
+    /**
+     * Handle inclusion of ReferencesMany relation
+     * @param callback
+     */
+    function includeReferencesMany(callback) {
+      var modelToIdName = idName(relation.modelTo);
+      var allTargetIds = [];
+      //Map for Indexing objects by their id for faster retrieval
+      var targetObjsMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        // one-to-many: foreign key reference is modelTo -> modelFrom.
+        // use modelFrom.keyFrom in where filter later
+        var targetIds = obj[relation.keyFrom];
+        if (targetIds) {
+          if (typeof targetIds === 'string') {
+            // For relational DBs, the array is stored as stringified json
+            // Please note obj is a plain object at this point
+            targetIds = JSON.parse(targetIds);
+          }
+          //referencesMany has multiple targetIds per obj. We need to concat
+          // them into allTargetIds before DB Call
+          allTargetIds = allTargetIds.concat(targetIds);
+          for (var j = 0; j < targetIds.length; j++) {
+            var targetId = targetIds[j];
+            var targetIdStr = targetId.toString();
+            var objList = targetObjsMap[targetIdStr] =
+              targetObjsMap[targetIdStr] || [];
+            objList.push(obj);
+          }
+        }
+        // sourceId can be null. but cache empty data as result
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = [];
+      }
+      filter.where[relation.keyTo] = {
+        inq: uniq(allTargetIds)
+      };
+      relation.applyScope(null, filter);
+      /**
+       * Make the DB Call, fetch all target objects
+       */
+      relation.modelTo.find(filter, options, targetFetchHandler);
+      /**
+       * Handle the fetched target objects
+       * @param err
+       * @param {Array<Model>}targets
+       * @returns {*}
+       */
+      function targetFetchHandler(err, targets) {
+        if (err) {
+          return callback(err);
+        }
+        var tasks = [];
+        //simultaneously process subIncludes
+        if (subInclude && targets) {
+          tasks.push(function subIncludesTask(next) {
+            relation.modelTo.include(targets, subInclude, options, next);
+          });
+        }
+        targets = utils.sortObjectsByIds(modelToIdName, allTargetIds, targets);
+        //process each target object
+        tasks.push(targetLinkingTask);
+        function targetLinkingTask(next) {
+          async.each(targets, linkManyToMany, next);
+          function linkManyToMany(target, next) {
+            var objList = targetObjsMap[target[relation.keyTo].toString()];
+            async.each(objList, function (obj, next) {
+              if (!obj) return next();
+              obj.__cachedRelations[relationName].push(target);
+              processTargetObj(obj, next);
+            }, next);
+
+          }
+        }
+
+        execTasksWithInterLeave(tasks, callback);
+      }
+    }
+
+    /**
+     * Handle inclusion of HasMany relation
+     * @param callback
+     */
+    function includeHasManySimple(callback) {
+      //Map for Indexing objects by their id for faster retrieval
+      var objIdMap2 = includeUtils.buildOneToOneIdentityMapWithOrigKeys(objs, relation.keyFrom);
+
+      filter.where[relation.keyTo] = {
+        inq: uniq(objIdMap2.getKeys())
+      };
+
+      relation.applyScope(null, filter);
+      relation.modelTo.find(filter, options, targetFetchHandler);
+
+      function targetFetchHandler(err, targets) {
+        if(err) {
+          return callback(err);
+        }
+        var targetsIdMap = includeUtils.buildOneToManyIdentityMapWithOrigKeys(targets, relation.keyTo);
+        includeUtils.join(objIdMap2, targetsIdMap, function(obj1, valueToMergeIn){
+          defineCachedRelations(obj1);
+          obj1.__cachedRelations[relationName] = valueToMergeIn;
+          processTargetObj(obj1, function(){});
+        });
+        callback(err, objs);
+      }
+    }
+
+    /**
+     * Handle inclusion of HasMany relation
+     * @param callback
+     */
+    function includeHasMany(callback) {
+      var sourceIds = [];
+      //Map for Indexing objects by their id for faster retrieval
+      var objIdMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        // one-to-many: foreign key reference is modelTo -> modelFrom.
+        // use modelFrom.keyFrom in where filter later
+        var sourceId = obj[relation.keyFrom];
+        if (sourceId) {
+          sourceIds.push(sourceId);
+          objIdMap[sourceId.toString()] = obj;
+        }
+        // sourceId can be null. but cache empty data as result
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = [];
+      }
+      filter.where[relation.keyTo] = {
+        inq: uniq(sourceIds)
+      };
+      relation.applyScope(null, filter);
+      options.partitionBy = relation.keyTo;
+      relation.modelTo.find(filter, options, targetFetchHandler);
+      /**
+       * Process fetched related objects
+       * @param err
+       * @param {Array<Model>} targets
+       * @returns {*}
+       */
+      function targetFetchHandler(err, targets) {
+        if (err) {
+          return callback(err);
+        }
+        var tasks = [];
+        //simultaneously process subIncludes
+        if (subInclude && targets) {
+          tasks.push(function subIncludesTask(next) {
+            relation.modelTo.include(targets, subInclude, options, next);
+          });
+        }
+        //process each target object
+        tasks.push(targetLinkingTask);
+        function targetLinkingTask(next) {
+          if (targets.length === 0) {
+            return async.each(objs, function(obj, next) {
+              processTargetObj(obj, next);
+            }, next);
+          }
+
+          async.each(targets, linkManyToOne, next);
+          function linkManyToOne(target, next) {
+            //fix for bug in hasMany with referencesMany
+            var targetIds = [].concat(target[relation.keyTo]);
+            async.each(targetIds, function (targetId, next) {
+              var obj = objIdMap[targetId.toString()];
+              if (!obj) return next();
+              obj.__cachedRelations[relationName].push(target);
+              processTargetObj(obj, next);
+            }, function(err, processedTargets) {
+              if (err) {
+                return next(err);
+              }
+
+              var objsWithEmptyRelation = objs.filter(function(obj) {
+                return obj.__cachedRelations[relationName].length === 0;
+              });
+              async.each(objsWithEmptyRelation, function(obj, next) {
+                processTargetObj(obj, next);
+              }, function(err) {
+                next(err, processedTargets);
+              });
+            });
+          }
+        }
+
+        execTasksWithInterLeave(tasks, callback);
+      }
+    }
+
+    /**
+     * Handle Inclusion of Polymorphic BelongsTo relation
+     * @param callback
+     */
+    function includePolymorphicBelongsTo(callback) {
+      var targetIdsByType = {};
+      //Map for Indexing objects by their type and targetId for faster retrieval
+      var targetObjMapByType = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        var discriminator = polymorphic.discriminator;
+        var modelType = obj[discriminator];
+        if (modelType) {
+          targetIdsByType[modelType] = targetIdsByType[modelType] || [];
+          targetObjMapByType[modelType] = targetObjMapByType[modelType] || {};
+          var targetIds = targetIdsByType[modelType];
+          var targetObjsMap = targetObjMapByType[modelType];
+          var targetId = obj[relation.keyFrom];
+          if (targetId) {
+            targetIds.push(targetId);
+            var targetIdStr = targetId.toString();
+            targetObjsMap[targetIdStr] = targetObjsMap[targetIdStr] || [];
+            //Is belongsTo. Multiple objects can have the same
+            //targetId and therefore map value is an array
+            targetObjsMap[targetIdStr].push(obj);
+          }
+        }
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = null;
+      }
+      async.each(Object.keys(targetIdsByType), processPolymorphicType,
+        callback);
+      /**
+       * Process Polymorphic objects of each type (modelType)
+       * @param {String} modelType
+       * @param callback
+       */
+      function processPolymorphicType(modelType, callback) {
+        var typeFilter = {where: {}};
+        utils.mergeQuery(typeFilter, filter);
+        var targetIds = targetIdsByType[modelType];
+        typeFilter.where[relation.keyTo] = {
+          inq: uniq(targetIds)
+        };
+        var Model = lookupModel(relation.modelFrom.dataSource.modelBuilder.
+          models, modelType);
+        if (!Model) {
+          callback(new Error('Discriminator type "' + modelType +
+            ' specified but no model exists with such name'));
+          return;
+        }
+        relation.applyScope(null, typeFilter);
+        Model.find(typeFilter, options, targetFetchHandler);
+        /**
+         * Process fetched related objects
+         * @param err
+         * @param {Array<Model>} targets
+         * @returns {*}
+         */
+        function targetFetchHandler(err, targets) {
+          if (err) {
+            return callback(err);
+          }
+          var tasks = [];
+
+          //simultaneously process subIncludes
+          if (subInclude && targets) {
+            tasks.push(function subIncludesTask(next) {
+              Model.include(targets, subInclude, options, next);
+            });
+          }
+          //process each target object
+          tasks.push(targetLinkingTask);
+          function targetLinkingTask(next) {
+            var targetObjsMap = targetObjMapByType[modelType];
+            async.each(targets, linkOneToMany, next);
+            function linkOneToMany(target, next) {
+              var objList = targetObjsMap[target[relation.keyTo].toString()];
+              async.each(objList, function (obj, next) {
+                if (!obj) return next();
+                obj.__cachedRelations[relationName] = target;
+                processTargetObj(obj, next);
+              }, next);
+            }
+          }
+
+          execTasksWithInterLeave(tasks, callback);
+        }
+      }
+    }
+
+
+    /**
+     * Handle Inclusion of Polymorphic HasOne relation
+     * @param callback
+     */
+    function includePolymorphicHasOne(callback) {
+      var sourceIds = [];
+      //Map for Indexing objects by their id for faster retrieval
+      var objIdMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        // one-to-one: foreign key reference is modelTo -> modelFrom.
+        // use modelFrom.keyFrom in where filter later
+        var sourceId = obj[relation.keyFrom];
+        if (sourceId) {
+          sourceIds.push(sourceId);
+          objIdMap[sourceId.toString()] = obj;
+        }
+        // sourceId can be null. but cache empty data as result
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = null;
+      }
+      filter.where[relation.keyTo] = {
+        inq: uniq(sourceIds)
+      };
+      relation.applyScope(null, filter);
+      relation.modelTo.find(filter, options, targetFetchHandler);
+      /**
+       * Process fetched related objects
+       * @param err
+       * @param {Array<Model>} targets
+       * @returns {*}
+       */
+      function targetFetchHandler(err, targets) {
+        if (err) {
+          return callback(err);
+        }
+        var tasks = [];
+        //simultaneously process subIncludes
+        if (subInclude && targets) {
+          tasks.push(function subIncludesTask(next) {
+            relation.modelTo.include(targets, subInclude, options, next);
+          });
+        }
+        //process each target object
+        tasks.push(targetLinkingTask);
+        function targetLinkingTask(next) {
+          async.each(targets, linkOneToOne, next);
+          function linkOneToOne(target, next) {
+            var sourceId = target[relation.keyTo];
+            if (!sourceId) return next();
+            var obj = objIdMap[sourceId.toString()];
+            if (!obj) return next();
+            obj.__cachedRelations[relationName] = target;
+            processTargetObj(obj, next);
+          }
+        }
+
+        execTasksWithInterLeave(tasks, callback);
+      }
+    }
+
+    /**
+     * Handle Inclusion of BelongsTo/HasOne relation
+     * @param callback
+     */
+    function includeOneToOne(callback) {
+      var targetIds = [];
+      var objTargetIdMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        if (relation.type === 'belongsTo') {
+          if (obj[relation.keyFrom] === null ||
+            obj[relation.keyFrom] === undefined) {
+            defineCachedRelations(obj);
+            obj.__cachedRelations[relationName] = null;
+            continue;
+          }
+        }
+        var targetId = obj[relation.keyFrom];
+        if (targetId) {
+          targetIds.push(targetId);
+          var targetIdStr = targetId.toString();
+          objTargetIdMap[targetIdStr] = objTargetIdMap[targetIdStr] || [];
+          objTargetIdMap[targetIdStr].push(obj);
+        }
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = null;
+      }
+      filter.where[relation.keyTo] = {
+        inq: uniq(targetIds)
+      };
+      relation.applyScope(null, filter);
+      relation.modelTo.find(filter, options, targetFetchHandler);
+      /**
+       * Process fetched related objects
+       * @param err
+       * @param {Array<Model>} targets
+       * @returns {*}
+       */
+      function targetFetchHandler(err, targets) {
+        if (err) {
+          return callback(err);
+        }
+        var tasks = [];
+        //simultaneously process subIncludes
+        if (subInclude && targets) {
+          tasks.push(function subIncludesTask(next) {
+            relation.modelTo.include(targets, subInclude, options, next);
+          });
+        }
+        //process each target object
+        tasks.push(targetLinkingTask);
+        function targetLinkingTask(next) {
+          async.each(targets, linkOneToMany, next);
+          function linkOneToMany(target, next) {
+            var targetId = target[relation.keyTo];
+            var objList = objTargetIdMap[targetId.toString()];
+            async.each(objList, function (obj, next) {
+              if (!obj) return next();
+              obj.__cachedRelations[relationName] = target;
+              processTargetObj(obj, next);
+            }, next);
+          }
+        }
+
+        execTasksWithInterLeave(tasks, callback);
+      }
+    }
+
+
+    /**
+     * Handle Inclusion of EmbedsMany/EmbedsManyWithBelongsTo/EmbedsOne
+     * Relations. Since Embedded docs are part of parents, no need to make
+     * db calls. Let the related function be called for each object to fetch
+     * the results from cache.
+     *
+     * TODO: Optimize EmbedsManyWithBelongsTo relation DB Calls
+     * @param callback
+     */
+    function includeEmbeds(callback) {
+      async.each(objs, function (obj, next) {
+        processTargetObj(obj, next);
+      }, callback);
+    }
+
+    /**
+     * Process Each Model Object and make sure specified relations are included
+     * @param {Model} obj - Single Mode object for which inclusion is needed
+     * @param callback
+     * @returns {*}
+     */
+    function processTargetObj(obj, callback) {
+
+      var isInst = obj instanceof self;
+
+      // Calling the relation method on the instance
+      if (relation.type === 'belongsTo') {
+        // If the belongsTo relation doesn't have an owner
+        if (obj[relation.keyFrom] === null || obj[relation.keyFrom] === undefined) {
+          defineCachedRelations(obj);
+          // Set to null if the owner doesn't exist
+          obj.__cachedRelations[relationName] = null;
+          if (isInst) {
+            obj.__data[relationName] = null;
+          } else {
+            obj[relationName] = null;
+          }
+          return callback();
+        }
+      }
+      /**
+       * Sets the related objects as a property of Parent Object
+       * @param {Array<Model>|Model|null} result - Related Object/Objects
+       * @param cb
+       */
+      function setIncludeData(result, cb) {
+        if (isInst) {
+          if (Array.isArray(result) && !(result instanceof List)) {
+            result = new List(result, relation.modelTo);
+          }
+          obj.__data[relationName] = result;
+          obj.setStrict(false);
+        } else {
+          obj[relationName] = result;
+        }
+        cb(null, result);
+      }
+
+      //obj.__cachedRelations[relationName] can be null if no data was returned
+      if (obj.__cachedRelations &&
+        obj.__cachedRelations[relationName] !== undefined) {
+        return setIncludeData(obj.__cachedRelations[relationName],
+          callback);
+      }
+
+      var inst = (obj instanceof self) ? obj : new self(obj);
+
+      //If related objects are not cached by include Handlers, directly call
+      //related accessor function even though it is not very efficient
+      var related; // relation accessor function
+
+      if ((relation.multiple || relation.type === 'belongsTo') && scope) {
+        var includeScope = {};
+        var filter = scope.conditions();
+
+        // make sure not to miss any fields for sub includes
+        if (filter.fields && Array.isArray(subInclude) && relation.modelTo.relations) {
+          includeScope.fields = [];
+          subInclude.forEach(function(name) {
+            var rel = relation.modelTo.relations[name];
+            if (rel && rel.type === 'belongsTo') {
+              includeScope.fields.push(rel.keyFrom);
+            }
+          });
+        }
+
+        utils.mergeQuery(filter, includeScope, {fields: false});
+
+        related = inst[relationName].bind(inst, filter);
+      } else {
+        related = inst[relationName].bind(inst, undefined);
+      }
+
+      related(options, function (err, result) {
+        if (err) {
+          return callback(err);
+        } else {
+
+          defineCachedRelations(obj);
+          obj.__cachedRelations[relationName] = result;
+
+          return setIncludeData(result, callback);
+        }
+      });
+    }
+
+  }
+};
+
+
+}).call(this,require('_process'))
+},{"./include_utils":528,"./list":531,"./utils":542,"_process":279,"async":544}],528:[function(require,module,exports){
 arguments[4][193][0].apply(exports,arguments)
-},{"dup":193}],496:[function(require,module,exports){
+},{"dup":193}],529:[function(require,module,exports){
 arguments[4][194][0].apply(exports,arguments)
-},{"dup":194}],497:[function(require,module,exports){
+},{"dup":194}],530:[function(require,module,exports){
 arguments[4][195][0].apply(exports,arguments)
-},{"dup":195,"util":396}],498:[function(require,module,exports){
+},{"dup":195,"util":396}],531:[function(require,module,exports){
 arguments[4][196][0].apply(exports,arguments)
-},{"./types":508,"dup":196,"util":396}],499:[function(require,module,exports){
+},{"./types":541,"dup":196,"util":396}],532:[function(require,module,exports){
 arguments[4][197][0].apply(exports,arguments)
-},{"./model.js":502,"assert":22,"debug":416,"dup":197}],500:[function(require,module,exports){
+},{"./model.js":535,"assert":22,"debug":417,"dup":197}],533:[function(require,module,exports){
 arguments[4][198][0].apply(exports,arguments)
-},{"./introspection":496,"./list.js":498,"./mixins":499,"./model-definition.js":501,"./model.js":502,"./types":508,"./utils":509,"assert":22,"depd":488,"dup":198,"events":111,"inflection":458,"util":396}],501:[function(require,module,exports){
+},{"./introspection":529,"./list.js":531,"./mixins":532,"./model-definition.js":534,"./model.js":535,"./types":541,"./utils":542,"assert":22,"depd":521,"dup":198,"events":111,"inflection":459,"util":396}],534:[function(require,module,exports){
 arguments[4][199][0].apply(exports,arguments)
-},{"./model":502,"./model-builder":500,"./types":508,"assert":22,"dup":199,"events":111,"traverse":634,"util":396}],502:[function(require,module,exports){
+},{"./model":535,"./model-builder":533,"./types":541,"assert":22,"dup":199,"events":111,"traverse":667,"util":396}],535:[function(require,module,exports){
 arguments[4][200][0].apply(exports,arguments)
-},{"./hooks":493,"./jutil":497,"./list":498,"./observer":503,"./utils":509,"./validations":510,"_process":279,"async":511,"depd":488,"dup":200,"node-uuid":561,"util":396}],503:[function(require,module,exports){
+},{"./hooks":526,"./jutil":530,"./list":531,"./observer":536,"./utils":542,"./validations":543,"_process":279,"async":544,"depd":521,"dup":200,"node-uuid":594,"util":396}],536:[function(require,module,exports){
 arguments[4][201][0].apply(exports,arguments)
-},{"./utils":509,"async":511,"dup":201}],504:[function(require,module,exports){
+},{"./utils":542,"async":544,"dup":201}],537:[function(require,module,exports){
 arguments[4][202][0].apply(exports,arguments)
-},{"./connectors/memory":489,"./model.js":502,"./scope.js":506,"./utils":509,"./validations.js":510,"_process":279,"assert":22,"async":511,"debug":416,"dup":202,"inflection":458,"util":396}],505:[function(require,module,exports){
+},{"./connectors/memory":522,"./model.js":535,"./scope.js":539,"./utils":542,"./validations.js":543,"_process":279,"assert":22,"async":544,"debug":417,"dup":202,"inflection":459,"util":396}],538:[function(require,module,exports){
 arguments[4][203][0].apply(exports,arguments)
-},{"./relation-definition":504,"dup":203}],506:[function(require,module,exports){
+},{"./relation-definition":537,"dup":203}],539:[function(require,module,exports){
 arguments[4][204][0].apply(exports,arguments)
-},{"./model.js":502,"./utils":509,"dup":204,"inflection":458}],507:[function(require,module,exports){
+},{"./model.js":535,"./utils":542,"dup":204,"inflection":459}],540:[function(require,module,exports){
 arguments[4][205][0].apply(exports,arguments)
-},{"./jutil":497,"./observer":503,"./utils":509,"_process":279,"debug":416,"dup":205,"loopback-connector":481,"node-uuid":561}],508:[function(require,module,exports){
+},{"./jutil":530,"./observer":536,"./utils":542,"_process":279,"debug":417,"dup":205,"loopback-connector":514,"node-uuid":594}],541:[function(require,module,exports){
 arguments[4][206][0].apply(exports,arguments)
-},{"./geo":492,"buffer":58,"dup":206}],509:[function(require,module,exports){
+},{"./geo":525,"buffer":58,"dup":206}],542:[function(require,module,exports){
 arguments[4][207][0].apply(exports,arguments)
-},{"_process":279,"assert":22,"dup":207,"qs":512,"traverse":634,"url":392}],510:[function(require,module,exports){
+},{"_process":279,"assert":22,"dup":207,"qs":545,"traverse":667,"url":392}],543:[function(require,module,exports){
 arguments[4][208][0].apply(exports,arguments)
-},{"_process":279,"dup":208,"util":396}],511:[function(require,module,exports){
+},{"_process":279,"dup":208,"util":396}],544:[function(require,module,exports){
 arguments[4][209][0].apply(exports,arguments)
-},{"_process":279,"dup":209}],512:[function(require,module,exports){
+},{"_process":279,"dup":209}],545:[function(require,module,exports){
 arguments[4][210][0].apply(exports,arguments)
-},{"./lib/":513,"dup":210}],513:[function(require,module,exports){
+},{"./lib/":546,"dup":210}],546:[function(require,module,exports){
 arguments[4][211][0].apply(exports,arguments)
-},{"./parse":514,"./stringify":515,"dup":211}],514:[function(require,module,exports){
+},{"./parse":547,"./stringify":548,"dup":211}],547:[function(require,module,exports){
 arguments[4][212][0].apply(exports,arguments)
-},{"./utils":516,"dup":212}],515:[function(require,module,exports){
+},{"./utils":549,"dup":212}],548:[function(require,module,exports){
 arguments[4][213][0].apply(exports,arguments)
-},{"./utils":516,"dup":213}],516:[function(require,module,exports){
+},{"./utils":549,"dup":213}],549:[function(require,module,exports){
 arguments[4][214][0].apply(exports,arguments)
-},{"dup":214}],517:[function(require,module,exports){
+},{"dup":214}],550:[function(require,module,exports){
 module.exports={
   "_args": [
     [
@@ -101044,11 +107702,11 @@ module.exports={
   "version": "2.44.0"
 }
 
-},{}],518:[function(require,module,exports){
+},{}],551:[function(require,module,exports){
 arguments[4][216][0].apply(exports,arguments)
-},{"dup":216}],519:[function(require,module,exports){
+},{"dup":216}],552:[function(require,module,exports){
 arguments[4][217][0].apply(exports,arguments)
-},{"dup":217}],520:[function(require,module,exports){
+},{"dup":217}],553:[function(require,module,exports){
 (function (process,Buffer){
 /*!
  * Module Dependencies.
@@ -101284,9 +107942,9 @@ module.exports = function(AccessToken) {
 };
 
 }).call(this,require('_process'),require("buffer").Buffer)
-},{"../../lib/loopback":548,"_process":279,"assert":22,"buffer":58,"uid2":637}],521:[function(require,module,exports){
+},{"../../lib/loopback":581,"_process":279,"assert":22,"buffer":58,"uid2":670}],554:[function(require,module,exports){
 arguments[4][218][0].apply(exports,arguments)
-},{"dup":218}],522:[function(require,module,exports){
+},{"dup":218}],555:[function(require,module,exports){
 (function (process){
 /*!
  Schema ACL options
@@ -101861,25 +108519,25 @@ module.exports = function(ACL) {
 };
 
 }).call(this,require('_process'))
-},{"../../lib/access-context":540,"../../lib/loopback":548,"_process":279,"assert":22,"async":408,"debug":416}],523:[function(require,module,exports){
+},{"../../lib/access-context":573,"../../lib/loopback":581,"_process":279,"assert":22,"async":409,"debug":417}],556:[function(require,module,exports){
 arguments[4][219][0].apply(exports,arguments)
-},{"dup":219}],524:[function(require,module,exports){
+},{"dup":219}],557:[function(require,module,exports){
 arguments[4][220][0].apply(exports,arguments)
-},{"../../lib/utils":553,"assert":22,"crypto":72,"dup":220}],525:[function(require,module,exports){
+},{"../../lib/utils":586,"assert":22,"crypto":72,"dup":220}],558:[function(require,module,exports){
 arguments[4][221][0].apply(exports,arguments)
-},{"dup":221}],526:[function(require,module,exports){
+},{"dup":221}],559:[function(require,module,exports){
 arguments[4][222][0].apply(exports,arguments)
-},{"../../lib/loopback":548,"assert":22,"async":408,"canonical-json":412,"crypto":72,"debug":416,"depd":488,"dup":222}],527:[function(require,module,exports){
+},{"../../lib/loopback":581,"assert":22,"async":409,"canonical-json":413,"crypto":72,"debug":417,"depd":521,"dup":222}],560:[function(require,module,exports){
 arguments[4][223][0].apply(exports,arguments)
-},{"dup":223}],528:[function(require,module,exports){
+},{"dup":223}],561:[function(require,module,exports){
 arguments[4][224][0].apply(exports,arguments)
-},{"assert":22,"dup":224}],529:[function(require,module,exports){
+},{"assert":22,"dup":224}],562:[function(require,module,exports){
 arguments[4][225][0].apply(exports,arguments)
-},{"dup":225}],530:[function(require,module,exports){
+},{"dup":225}],563:[function(require,module,exports){
 arguments[4][226][0].apply(exports,arguments)
-},{"dup":226}],531:[function(require,module,exports){
+},{"dup":226}],564:[function(require,module,exports){
 arguments[4][227][0].apply(exports,arguments)
-},{"dup":227}],532:[function(require,module,exports){
+},{"dup":227}],565:[function(require,module,exports){
 (function (process){
 var loopback = require('../../lib/loopback');
 
@@ -101967,9 +108625,9 @@ module.exports = function(RoleMapping) {
 };
 
 }).call(this,require('_process'))
-},{"../../lib/loopback":548,"_process":279}],533:[function(require,module,exports){
+},{"../../lib/loopback":581,"_process":279}],566:[function(require,module,exports){
 arguments[4][228][0].apply(exports,arguments)
-},{"dup":228}],534:[function(require,module,exports){
+},{"dup":228}],567:[function(require,module,exports){
 (function (process){
 var loopback = require('../../lib/loopback');
 var debug = require('debug')('loopback:security:role');
@@ -102418,13 +109076,13 @@ module.exports = function(Role) {
 };
 
 }).call(this,require('_process'))
-},{"../../lib/access-context":540,"../../lib/loopback":548,"_process":279,"assert":22,"async":408,"debug":416}],535:[function(require,module,exports){
+},{"../../lib/access-context":573,"../../lib/loopback":581,"_process":279,"assert":22,"async":409,"debug":417}],568:[function(require,module,exports){
 arguments[4][229][0].apply(exports,arguments)
-},{"dup":229}],536:[function(require,module,exports){
+},{"dup":229}],569:[function(require,module,exports){
 arguments[4][230][0].apply(exports,arguments)
-},{"../../lib/loopback":548,"assert":22,"dup":230}],537:[function(require,module,exports){
+},{"../../lib/loopback":581,"assert":22,"dup":230}],570:[function(require,module,exports){
 arguments[4][231][0].apply(exports,arguments)
-},{"dup":231}],538:[function(require,module,exports){
+},{"dup":231}],571:[function(require,module,exports){
 (function (__dirname){
 /*!
  * Module Dependencies.
@@ -103150,11 +109808,11 @@ module.exports = function(User) {
 };
 
 }).call(this,"/..\\node_modules\\loopback\\common\\models")
-},{"../../lib/loopback":548,"../../lib/utils":553,"assert":22,"bcrypt":29,"bcryptjs":410,"crypto":72,"debug":416,"path":274}],539:[function(require,module,exports){
+},{"../../lib/loopback":581,"../../lib/utils":586,"assert":22,"bcrypt":29,"bcryptjs":411,"crypto":72,"debug":417,"path":274}],572:[function(require,module,exports){
 arguments[4][232][0].apply(exports,arguments)
-},{"./lib/connectors/base-connector":544,"./lib/connectors/mail":545,"./lib/connectors/memory":546,"./lib/loopback":548,"dup":232,"loopback-connector-remote":478,"loopback-datasource-juggler":487,"loopback-datasource-juggler/lib/geo":492}],540:[function(require,module,exports){
+},{"./lib/connectors/base-connector":577,"./lib/connectors/mail":578,"./lib/connectors/memory":579,"./lib/loopback":581,"dup":232,"loopback-connector-remote":511,"loopback-datasource-juggler":520,"loopback-datasource-juggler/lib/geo":525}],573:[function(require,module,exports){
 arguments[4][233][0].apply(exports,arguments)
-},{"./loopback":548,"assert":22,"debug":416,"dup":233}],541:[function(require,module,exports){
+},{"./loopback":581,"assert":22,"debug":417,"dup":233}],574:[function(require,module,exports){
 (function (process,__dirname){
 /*!
  * Module dependencies.
@@ -103718,17 +110376,17 @@ app.listen = function(cb) {
 };
 
 }).call(this,require('_process'),"/..\\node_modules\\loopback\\lib")
-},{"./registry":551,"_process":279,"assert":22,"fs":56,"http":350,"loopback-datasource-juggler":487,"path":274,"strong-remoting":612,"underscore.string/camelize":638,"underscore.string/classify":640,"util":396}],542:[function(require,module,exports){
+},{"./registry":584,"_process":279,"assert":22,"fs":56,"http":350,"loopback-datasource-juggler":520,"path":274,"strong-remoting":645,"underscore.string/camelize":671,"underscore.string/classify":673,"util":396}],575:[function(require,module,exports){
 arguments[4][235][0].apply(exports,arguments)
-},{"dup":235,"events":111,"util":396}],543:[function(require,module,exports){
+},{"dup":235,"events":111,"util":396}],576:[function(require,module,exports){
 arguments[4][236][0].apply(exports,arguments)
-},{"../common/models/access-token.js":520,"../common/models/access-token.json":519,"../common/models/acl.js":522,"../common/models/acl.json":521,"../common/models/application.js":524,"../common/models/application.json":523,"../common/models/change.js":526,"../common/models/change.json":525,"../common/models/checkpoint.js":528,"../common/models/checkpoint.json":527,"../common/models/email.js":530,"../common/models/email.json":529,"../common/models/role-mapping.js":532,"../common/models/role-mapping.json":531,"../common/models/role.js":534,"../common/models/role.json":533,"../common/models/scope.js":536,"../common/models/scope.json":535,"../common/models/user.js":538,"../common/models/user.json":537,"dup":236}],544:[function(require,module,exports){
+},{"../common/models/access-token.js":553,"../common/models/access-token.json":552,"../common/models/acl.js":555,"../common/models/acl.json":554,"../common/models/application.js":557,"../common/models/application.json":556,"../common/models/change.js":559,"../common/models/change.json":558,"../common/models/checkpoint.js":561,"../common/models/checkpoint.json":560,"../common/models/email.js":563,"../common/models/email.json":562,"../common/models/role-mapping.js":565,"../common/models/role-mapping.json":564,"../common/models/role.js":567,"../common/models/role.json":566,"../common/models/scope.js":569,"../common/models/scope.json":568,"../common/models/user.js":571,"../common/models/user.json":570,"dup":236}],577:[function(require,module,exports){
 arguments[4][237][0].apply(exports,arguments)
-},{"assert":22,"debug":416,"dup":237,"events":111,"util":396}],545:[function(require,module,exports){
+},{"assert":22,"debug":417,"dup":237,"events":111,"util":396}],578:[function(require,module,exports){
 arguments[4][238][0].apply(exports,arguments)
-},{"../loopback":548,"_process":279,"assert":22,"debug":416,"dup":238,"nodemailer":29}],546:[function(require,module,exports){
+},{"../loopback":581,"_process":279,"assert":22,"debug":417,"dup":238,"nodemailer":29}],579:[function(require,module,exports){
 arguments[4][239][0].apply(exports,arguments)
-},{"./base-connector":544,"assert":22,"debug":416,"dup":239,"loopback-datasource-juggler/lib/connectors/memory":489,"util":396}],547:[function(require,module,exports){
+},{"./base-connector":577,"assert":22,"debug":417,"dup":239,"loopback-datasource-juggler/lib/connectors/memory":522,"util":396}],580:[function(require,module,exports){
 (function (__dirname){
 var path = require('path');
 
@@ -103784,7 +110442,7 @@ middlewares.favicon = function(icon, options) {
 };
 
 }).call(this,"/..\\node_modules\\loopback\\lib")
-},{"path":274}],548:[function(require,module,exports){
+},{"path":274}],581:[function(require,module,exports){
 (function (__dirname){
 /*!
  * Module dependencies.
@@ -104205,17 +110863,17 @@ require('./builtin-models')(loopback);
 loopback.DataSource = juggler.DataSource;
 
 }).call(this,"/..\\node_modules\\loopback\\lib")
-},{"../package.json":554,"../server/current-context":518,"./application":541,"./builtin-models":543,"./express-middleware":547,"./registry":551,"./runtime":552,"./server-app":542,"assert":22,"ejs":423,"express":542,"fs":56,"loopback-datasource-juggler":487,"path":274,"util":396}],549:[function(require,module,exports){
+},{"../package.json":587,"../server/current-context":551,"./application":574,"./builtin-models":576,"./express-middleware":580,"./registry":584,"./runtime":585,"./server-app":575,"assert":22,"ejs":424,"express":575,"fs":56,"loopback-datasource-juggler":520,"path":274,"util":396}],582:[function(require,module,exports){
 arguments[4][242][0].apply(exports,arguments)
-},{"assert":22,"dup":242,"loopback-datasource-juggler":487,"strong-remoting":612,"util":396}],550:[function(require,module,exports){
+},{"assert":22,"dup":242,"loopback-datasource-juggler":520,"strong-remoting":645,"util":396}],583:[function(require,module,exports){
 arguments[4][243][0].apply(exports,arguments)
-},{"./runtime":552,"./utils":553,"_process":279,"assert":22,"async":408,"debug":416,"depd":488,"dup":243,"stream":349}],551:[function(require,module,exports){
+},{"./runtime":585,"./utils":586,"_process":279,"assert":22,"async":409,"debug":417,"depd":521,"dup":243,"stream":349}],584:[function(require,module,exports){
 arguments[4][244][0].apply(exports,arguments)
-},{"./model":549,"./persisted-model":550,"assert":22,"debug":416,"dup":244,"loopback-datasource-juggler":487,"util":396}],552:[function(require,module,exports){
+},{"./model":582,"./persisted-model":583,"assert":22,"debug":417,"dup":244,"loopback-datasource-juggler":520,"util":396}],585:[function(require,module,exports){
 arguments[4][245][0].apply(exports,arguments)
-},{"dup":245}],553:[function(require,module,exports){
+},{"dup":245}],586:[function(require,module,exports){
 arguments[4][246][0].apply(exports,arguments)
-},{"dup":246}],554:[function(require,module,exports){
+},{"dup":246}],587:[function(require,module,exports){
 module.exports={
   "_args": [
     [
@@ -104392,113 +111050,113 @@ module.exports={
   "version": "2.26.2"
 }
 
-},{}],555:[function(require,module,exports){
+},{}],588:[function(require,module,exports){
 arguments[4][249][0].apply(exports,arguments)
-},{"dup":249}],556:[function(require,module,exports){
+},{"dup":249}],589:[function(require,module,exports){
 arguments[4][250][0].apply(exports,arguments)
-},{"./db.json":555,"dup":250}],557:[function(require,module,exports){
+},{"./db.json":588,"dup":250}],590:[function(require,module,exports){
 arguments[4][251][0].apply(exports,arguments)
-},{"dup":251,"mime-db":556,"path":274}],558:[function(require,module,exports){
+},{"dup":251,"mime-db":589,"path":274}],591:[function(require,module,exports){
 arguments[4][253][0].apply(exports,arguments)
-},{"dup":253}],559:[function(require,module,exports){
+},{"dup":253}],592:[function(require,module,exports){
 arguments[4][254][0].apply(exports,arguments)
-},{"./inject":560,"dup":254,"stream-serializer":609}],560:[function(require,module,exports){
+},{"./inject":593,"dup":254,"stream-serializer":642}],593:[function(require,module,exports){
 arguments[4][255][0].apply(exports,arguments)
-},{"dup":255,"duplex":419,"through":626,"xtend":648}],561:[function(require,module,exports){
+},{"dup":255,"duplex":420,"through":659,"xtend":681}],594:[function(require,module,exports){
 arguments[4][256][0].apply(exports,arguments)
-},{"buffer":58,"crypto":72,"dup":256}],562:[function(require,module,exports){
+},{"buffer":58,"crypto":72,"dup":256}],595:[function(require,module,exports){
 arguments[4][257][0].apply(exports,arguments)
-},{"crypto":72,"dup":257,"querystring":293}],563:[function(require,module,exports){
+},{"crypto":72,"dup":257,"querystring":293}],596:[function(require,module,exports){
 arguments[4][258][0].apply(exports,arguments)
-},{"dup":258,"fs":56}],564:[function(require,module,exports){
+},{"dup":258,"fs":56}],597:[function(require,module,exports){
 arguments[4][276][0].apply(exports,arguments)
-},{"dup":276,"pinkie":565}],565:[function(require,module,exports){
+},{"dup":276,"pinkie":598}],598:[function(require,module,exports){
 arguments[4][277][0].apply(exports,arguments)
-},{"_process":279,"dup":277}],566:[function(require,module,exports){
+},{"_process":279,"dup":277}],599:[function(require,module,exports){
 arguments[4][278][0].apply(exports,arguments)
-},{"_process":279,"dup":278}],567:[function(require,module,exports){
+},{"_process":279,"dup":278}],600:[function(require,module,exports){
 arguments[4][211][0].apply(exports,arguments)
-},{"./parse":568,"./stringify":569,"dup":211}],568:[function(require,module,exports){
+},{"./parse":601,"./stringify":602,"dup":211}],601:[function(require,module,exports){
 arguments[4][288][0].apply(exports,arguments)
-},{"./utils":570,"dup":288}],569:[function(require,module,exports){
+},{"./utils":603,"dup":288}],602:[function(require,module,exports){
 arguments[4][289][0].apply(exports,arguments)
-},{"./utils":570,"dup":289}],570:[function(require,module,exports){
+},{"./utils":603,"dup":289}],603:[function(require,module,exports){
 arguments[4][290][0].apply(exports,arguments)
-},{"dup":290}],571:[function(require,module,exports){
+},{"dup":290}],604:[function(require,module,exports){
 arguments[4][295][0].apply(exports,arguments)
-},{"./lib/_stream_duplex.js":572,"dup":295}],572:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":605,"dup":295}],605:[function(require,module,exports){
 arguments[4][296][0].apply(exports,arguments)
-},{"./_stream_readable":573,"./_stream_writable":574,"core-util-is":415,"dup":296,"inherits":459,"process-nextick-args":566}],573:[function(require,module,exports){
+},{"./_stream_readable":606,"./_stream_writable":607,"core-util-is":416,"dup":296,"inherits":460,"process-nextick-args":599}],606:[function(require,module,exports){
 arguments[4][298][0].apply(exports,arguments)
-},{"./_stream_duplex":572,"_process":279,"buffer":58,"core-util-is":415,"dup":298,"events":111,"inherits":459,"isarray":465,"process-nextick-args":566,"string_decoder/":610,"util":29}],574:[function(require,module,exports){
+},{"./_stream_duplex":605,"_process":279,"buffer":58,"core-util-is":416,"dup":298,"events":111,"inherits":460,"isarray":466,"process-nextick-args":599,"string_decoder/":643,"util":29}],607:[function(require,module,exports){
 arguments[4][300][0].apply(exports,arguments)
-},{"./_stream_duplex":572,"buffer":58,"core-util-is":415,"dup":300,"events":111,"inherits":459,"process-nextick-args":566,"util-deprecate":646}],575:[function(require,module,exports){
+},{"./_stream_duplex":605,"buffer":58,"core-util-is":416,"dup":300,"events":111,"inherits":460,"process-nextick-args":599,"util-deprecate":679}],608:[function(require,module,exports){
 arguments[4][305][0].apply(exports,arguments)
-},{"./lib/cookies":577,"./lib/helpers":580,"./request":586,"dup":305,"extend":427}],576:[function(require,module,exports){
+},{"./lib/cookies":610,"./lib/helpers":613,"./request":619,"dup":305,"extend":428}],609:[function(require,module,exports){
 arguments[4][306][0].apply(exports,arguments)
-},{"./helpers":580,"caseless":413,"dup":306,"node-uuid":561}],577:[function(require,module,exports){
+},{"./helpers":613,"caseless":414,"dup":306,"node-uuid":594}],610:[function(require,module,exports){
 arguments[4][307][0].apply(exports,arguments)
-},{"dup":307,"tough-cookie":627}],578:[function(require,module,exports){
+},{"dup":307,"tough-cookie":660}],611:[function(require,module,exports){
 arguments[4][308][0].apply(exports,arguments)
-},{"_process":279,"dup":308}],579:[function(require,module,exports){
+},{"_process":279,"dup":308}],612:[function(require,module,exports){
 arguments[4][309][0].apply(exports,arguments)
-},{"dup":309,"fs":56,"har-validator":434,"querystring":293,"util":396}],580:[function(require,module,exports){
+},{"dup":309,"fs":56,"har-validator":435,"querystring":293,"util":396}],613:[function(require,module,exports){
 arguments[4][310][0].apply(exports,arguments)
-},{"_process":279,"buffer":58,"crypto":72,"dup":310,"json-stringify-safe":475}],581:[function(require,module,exports){
+},{"_process":279,"buffer":58,"crypto":72,"dup":310,"json-stringify-safe":476}],614:[function(require,module,exports){
 arguments[4][311][0].apply(exports,arguments)
-},{"buffer":58,"combined-stream":414,"dup":311,"isstream":466,"node-uuid":561}],582:[function(require,module,exports){
+},{"buffer":58,"combined-stream":415,"dup":311,"isstream":467,"node-uuid":594}],615:[function(require,module,exports){
 arguments[4][312][0].apply(exports,arguments)
-},{"buffer":58,"caseless":413,"crypto":72,"dup":312,"node-uuid":561,"oauth-sign":562,"qs":567,"url":392}],583:[function(require,module,exports){
+},{"buffer":58,"caseless":414,"crypto":72,"dup":312,"node-uuid":594,"oauth-sign":595,"qs":600,"url":392}],616:[function(require,module,exports){
 arguments[4][313][0].apply(exports,arguments)
-},{"dup":313,"qs":567,"querystring":293}],584:[function(require,module,exports){
+},{"dup":313,"qs":600,"querystring":293}],617:[function(require,module,exports){
 arguments[4][314][0].apply(exports,arguments)
-},{"dup":314,"url":392}],585:[function(require,module,exports){
+},{"dup":314,"url":392}],618:[function(require,module,exports){
 arguments[4][315][0].apply(exports,arguments)
-},{"dup":315,"tunnel-agent":635,"url":392}],586:[function(require,module,exports){
+},{"dup":315,"tunnel-agent":668,"url":392}],619:[function(require,module,exports){
 arguments[4][316][0].apply(exports,arguments)
-},{"./lib/auth":576,"./lib/cookies":577,"./lib/getProxyFromURI":578,"./lib/har":579,"./lib/helpers":580,"./lib/multipart":581,"./lib/oauth":582,"./lib/querystring":583,"./lib/redirect":584,"./lib/tunnel":585,"_process":279,"aws-sign2":409,"bl":411,"buffer":58,"caseless":413,"dup":316,"forever-agent":429,"form-data":430,"hawk":452,"http":350,"http-signature":453,"https":150,"is-typedarray":464,"mime-types":557,"stream":349,"stringstream":611,"url":392,"util":396,"zlib":55}],587:[function(require,module,exports){
+},{"./lib/auth":609,"./lib/cookies":610,"./lib/getProxyFromURI":611,"./lib/har":612,"./lib/helpers":613,"./lib/multipart":614,"./lib/oauth":615,"./lib/querystring":616,"./lib/redirect":617,"./lib/tunnel":618,"_process":279,"aws-sign2":410,"bl":412,"buffer":58,"caseless":414,"dup":316,"forever-agent":430,"form-data":431,"hawk":453,"http":350,"http-signature":454,"https":150,"is-typedarray":465,"mime-types":590,"stream":349,"stringstream":644,"url":392,"util":396,"zlib":55}],620:[function(require,module,exports){
 arguments[4][327][0].apply(exports,arguments)
-},{"./lib/sse":588,"dup":327}],588:[function(require,module,exports){
+},{"./lib/sse":621,"dup":327}],621:[function(require,module,exports){
 arguments[4][328][0].apply(exports,arguments)
-},{"./sseclient":589,"dup":328,"events":111,"options":563,"querystring":293,"url":392,"util":396}],589:[function(require,module,exports){
+},{"./sseclient":622,"dup":328,"events":111,"options":596,"querystring":293,"url":392,"util":396}],622:[function(require,module,exports){
 arguments[4][329][0].apply(exports,arguments)
-},{"dup":329,"events":111,"util":396}],590:[function(require,module,exports){
+},{"dup":329,"events":111,"util":396}],623:[function(require,module,exports){
 arguments[4][330][0].apply(exports,arguments)
-},{"buffer":58,"dup":330}],591:[function(require,module,exports){
+},{"buffer":58,"dup":330}],624:[function(require,module,exports){
 arguments[4][331][0].apply(exports,arguments)
-},{"./algs":590,"./key":603,"./private-key":604,"./utils":607,"assert-plus":608,"buffer":58,"crypto":72,"dup":331,"ecc-jsbn":420,"ecc-jsbn/lib/ec":421,"jodid25519":467,"jsbn":473}],592:[function(require,module,exports){
+},{"./algs":623,"./key":636,"./private-key":637,"./utils":640,"assert-plus":641,"buffer":58,"crypto":72,"dup":331,"ecc-jsbn":421,"ecc-jsbn/lib/ec":422,"jodid25519":468,"jsbn":474}],625:[function(require,module,exports){
 arguments[4][332][0].apply(exports,arguments)
-},{"./signature":605,"assert-plus":608,"buffer":58,"dup":332,"stream":349,"tweetnacl":636,"util":396}],593:[function(require,module,exports){
+},{"./signature":638,"assert-plus":641,"buffer":58,"dup":332,"stream":349,"tweetnacl":669,"util":396}],626:[function(require,module,exports){
 arguments[4][333][0].apply(exports,arguments)
-},{"assert-plus":608,"dup":333,"util":396}],594:[function(require,module,exports){
+},{"assert-plus":641,"dup":333,"util":396}],627:[function(require,module,exports){
 arguments[4][334][0].apply(exports,arguments)
-},{"./algs":590,"./errors":593,"./key":603,"./utils":607,"assert-plus":608,"buffer":58,"crypto":72,"dup":334}],595:[function(require,module,exports){
+},{"./algs":623,"./errors":626,"./key":636,"./utils":640,"assert-plus":641,"buffer":58,"crypto":72,"dup":334}],628:[function(require,module,exports){
 arguments[4][335][0].apply(exports,arguments)
-},{"../key":603,"../private-key":604,"../utils":607,"./pem":596,"./rfc4253":599,"./ssh":601,"assert-plus":608,"buffer":58,"dup":335}],596:[function(require,module,exports){
+},{"../key":636,"../private-key":637,"../utils":640,"./pem":629,"./rfc4253":632,"./ssh":634,"assert-plus":641,"buffer":58,"dup":335}],629:[function(require,module,exports){
 arguments[4][336][0].apply(exports,arguments)
-},{"../algs":590,"../key":603,"../private-key":604,"../utils":607,"./pkcs1":597,"./pkcs8":598,"./rfc4253":599,"./ssh-private":600,"asn1":406,"assert-plus":608,"buffer":58,"dup":336}],597:[function(require,module,exports){
+},{"../algs":623,"../key":636,"../private-key":637,"../utils":640,"./pkcs1":630,"./pkcs8":631,"./rfc4253":632,"./ssh-private":633,"asn1":407,"assert-plus":641,"buffer":58,"dup":336}],630:[function(require,module,exports){
 arguments[4][337][0].apply(exports,arguments)
-},{"../algs":590,"../key":603,"../private-key":604,"../utils":607,"./pem":596,"./pkcs8":598,"asn1":406,"assert-plus":608,"buffer":58,"dup":337}],598:[function(require,module,exports){
+},{"../algs":623,"../key":636,"../private-key":637,"../utils":640,"./pem":629,"./pkcs8":631,"asn1":407,"assert-plus":641,"buffer":58,"dup":337}],631:[function(require,module,exports){
 arguments[4][338][0].apply(exports,arguments)
-},{"../algs":590,"../key":603,"../private-key":604,"../utils":607,"./pem":596,"asn1":406,"assert-plus":608,"buffer":58,"dup":338}],599:[function(require,module,exports){
+},{"../algs":623,"../key":636,"../private-key":637,"../utils":640,"./pem":629,"asn1":407,"assert-plus":641,"buffer":58,"dup":338}],632:[function(require,module,exports){
 arguments[4][339][0].apply(exports,arguments)
-},{"../algs":590,"../key":603,"../private-key":604,"../ssh-buffer":606,"../utils":607,"assert-plus":608,"buffer":58,"dup":339}],600:[function(require,module,exports){
+},{"../algs":623,"../key":636,"../private-key":637,"../ssh-buffer":639,"../utils":640,"assert-plus":641,"buffer":58,"dup":339}],633:[function(require,module,exports){
 arguments[4][340][0].apply(exports,arguments)
-},{"../algs":590,"../key":603,"../private-key":604,"../ssh-buffer":606,"../utils":607,"./pem":596,"./rfc4253":599,"asn1":406,"assert-plus":608,"buffer":58,"crypto":72,"dup":340}],601:[function(require,module,exports){
+},{"../algs":623,"../key":636,"../private-key":637,"../ssh-buffer":639,"../utils":640,"./pem":629,"./rfc4253":632,"asn1":407,"assert-plus":641,"buffer":58,"crypto":72,"dup":340}],634:[function(require,module,exports){
 arguments[4][341][0].apply(exports,arguments)
-},{"../key":603,"../private-key":604,"../utils":607,"./rfc4253":599,"./ssh-private":600,"assert-plus":608,"buffer":58,"dup":341}],602:[function(require,module,exports){
+},{"../key":636,"../private-key":637,"../utils":640,"./rfc4253":632,"./ssh-private":633,"assert-plus":641,"buffer":58,"dup":341}],635:[function(require,module,exports){
 arguments[4][342][0].apply(exports,arguments)
-},{"./errors":593,"./fingerprint":594,"./key":603,"./private-key":604,"./signature":605,"dup":342}],603:[function(require,module,exports){
+},{"./errors":626,"./fingerprint":627,"./key":636,"./private-key":637,"./signature":638,"dup":342}],636:[function(require,module,exports){
 arguments[4][343][0].apply(exports,arguments)
-},{"./algs":590,"./dhe":591,"./ed-compat":592,"./errors":593,"./fingerprint":594,"./formats/auto":595,"./formats/pem":596,"./formats/pkcs1":597,"./formats/pkcs8":598,"./formats/rfc4253":599,"./formats/ssh":601,"./formats/ssh-private":600,"./private-key":604,"./signature":605,"./utils":607,"assert-plus":608,"buffer":58,"crypto":72,"dup":343}],604:[function(require,module,exports){
+},{"./algs":623,"./dhe":624,"./ed-compat":625,"./errors":626,"./fingerprint":627,"./formats/auto":628,"./formats/pem":629,"./formats/pkcs1":630,"./formats/pkcs8":631,"./formats/rfc4253":632,"./formats/ssh":634,"./formats/ssh-private":633,"./private-key":637,"./signature":638,"./utils":640,"assert-plus":641,"buffer":58,"crypto":72,"dup":343}],637:[function(require,module,exports){
 arguments[4][344][0].apply(exports,arguments)
-},{"./algs":590,"./ed-compat":592,"./errors":593,"./fingerprint":594,"./formats/auto":595,"./formats/pem":596,"./formats/pkcs1":597,"./formats/pkcs8":598,"./formats/rfc4253":599,"./formats/ssh-private":600,"./key":603,"./signature":605,"./utils":607,"assert-plus":608,"buffer":58,"crypto":72,"dup":344,"jodid25519":467,"util":396}],605:[function(require,module,exports){
+},{"./algs":623,"./ed-compat":625,"./errors":626,"./fingerprint":627,"./formats/auto":628,"./formats/pem":629,"./formats/pkcs1":630,"./formats/pkcs8":631,"./formats/rfc4253":632,"./formats/ssh-private":633,"./key":636,"./signature":638,"./utils":640,"assert-plus":641,"buffer":58,"crypto":72,"dup":344,"jodid25519":468,"util":396}],638:[function(require,module,exports){
 arguments[4][345][0].apply(exports,arguments)
-},{"./algs":590,"./errors":593,"./ssh-buffer":606,"./utils":607,"asn1":406,"assert-plus":608,"buffer":58,"crypto":72,"dup":345}],606:[function(require,module,exports){
+},{"./algs":623,"./errors":626,"./ssh-buffer":639,"./utils":640,"asn1":407,"assert-plus":641,"buffer":58,"crypto":72,"dup":345}],639:[function(require,module,exports){
 arguments[4][346][0].apply(exports,arguments)
-},{"assert-plus":608,"buffer":58,"dup":346}],607:[function(require,module,exports){
+},{"assert-plus":641,"buffer":58,"dup":346}],640:[function(require,module,exports){
 arguments[4][347][0].apply(exports,arguments)
-},{"./private-key":604,"assert-plus":608,"buffer":58,"dup":347,"jsbn":473}],608:[function(require,module,exports){
+},{"./private-key":637,"assert-plus":641,"buffer":58,"dup":347,"jsbn":474}],641:[function(require,module,exports){
 (function (Buffer,process){
 // Copyright (c) 2012, Mark Cavage. All rights reserved.
 // Copyright 2015 Joyent, Inc.
@@ -104708,25 +111366,25 @@ function _setExports(ndebug) {
 module.exports = _setExports(process.env.NODE_NDEBUG);
 
 }).call(this,{"isBuffer":require("../../../../client/node_modules/is-buffer/index.js")},require('_process'))
-},{"../../../../client/node_modules/is-buffer/index.js":155,"_process":279,"assert":22,"stream":349,"util":396}],609:[function(require,module,exports){
+},{"../../../../client/node_modules/is-buffer/index.js":155,"_process":279,"assert":22,"stream":349,"util":396}],642:[function(require,module,exports){
 arguments[4][355][0].apply(exports,arguments)
-},{"dup":355,"events":111}],610:[function(require,module,exports){
+},{"dup":355,"events":111}],643:[function(require,module,exports){
 arguments[4][356][0].apply(exports,arguments)
-},{"buffer":58,"dup":356}],611:[function(require,module,exports){
+},{"buffer":58,"dup":356}],644:[function(require,module,exports){
 arguments[4][357][0].apply(exports,arguments)
-},{"buffer":58,"dup":357,"stream":349,"string_decoder":356,"util":396}],612:[function(require,module,exports){
+},{"buffer":58,"dup":357,"stream":349,"string_decoder":356,"util":396}],645:[function(require,module,exports){
 arguments[4][358][0].apply(exports,arguments)
-},{"./lib/remote-objects":617,"./lib/shared-class":619,"dup":358}],613:[function(require,module,exports){
+},{"./lib/remote-objects":650,"./lib/shared-class":652,"dup":358}],646:[function(require,module,exports){
 arguments[4][359][0].apply(exports,arguments)
-},{"assert":22,"debug":416,"dup":359}],614:[function(require,module,exports){
+},{"assert":22,"debug":417,"dup":359}],647:[function(require,module,exports){
 arguments[4][360][0].apply(exports,arguments)
-},{"debug":416,"dup":360}],615:[function(require,module,exports){
+},{"debug":417,"dup":360}],648:[function(require,module,exports){
 arguments[4][361][0].apply(exports,arguments)
-},{"./dynamic":613,"_process":279,"assert":22,"debug":416,"dup":361,"events":111,"js2xmlparser":29,"mux-demux":559,"sse":587,"util":396}],616:[function(require,module,exports){
+},{"./dynamic":646,"_process":279,"assert":22,"debug":417,"dup":361,"events":111,"js2xmlparser":29,"mux-demux":592,"sse":620,"util":396}],649:[function(require,module,exports){
 arguments[4][362][0].apply(exports,arguments)
-},{"./dynamic":613,"assert":22,"debug":416,"dup":362,"events":111,"mux-demux":559,"path":274,"qs":621,"request":575,"stream":349,"url":392,"util":396}],617:[function(require,module,exports){
+},{"./dynamic":646,"assert":22,"debug":417,"dup":362,"events":111,"mux-demux":592,"path":274,"qs":654,"request":608,"stream":349,"url":392,"util":396}],650:[function(require,module,exports){
 arguments[4][363][0].apply(exports,arguments)
-},{"./dynamic":613,"./exports-helper":614,"./rest-adapter":618,"./shared-class":619,"_process":279,"assert":22,"debug":416,"dup":363,"eventemitter2":426,"url":392,"util":396}],618:[function(require,module,exports){
+},{"./dynamic":646,"./exports-helper":647,"./rest-adapter":651,"./shared-class":652,"_process":279,"assert":22,"debug":417,"dup":363,"eventemitter2":427,"url":392,"util":396}],651:[function(require,module,exports){
 (function (process){
 /*!
  * Expose `RestAdapter`.
@@ -105377,35 +112035,35 @@ function joinPaths(left, right) {
 }
 
 }).call(this,require('_process'))
-},{"./http-context":615,"./http-invocation":616,"_process":279,"assert":22,"async":408,"body-parser":29,"cors":29,"debug":416,"events":111,"express":29,"util":396}],619:[function(require,module,exports){
+},{"./http-context":648,"./http-invocation":649,"_process":279,"assert":22,"async":409,"body-parser":29,"cors":29,"debug":417,"events":111,"express":29,"util":396}],652:[function(require,module,exports){
 arguments[4][365][0].apply(exports,arguments)
-},{"./shared-method":620,"assert":22,"debug":416,"dup":365,"inflection":458,"util":396}],620:[function(require,module,exports){
+},{"./shared-method":653,"assert":22,"debug":417,"dup":365,"inflection":459,"util":396}],653:[function(require,module,exports){
 arguments[4][366][0].apply(exports,arguments)
-},{"assert":22,"buffer":58,"debug":416,"dup":366,"traverse":634,"util":396}],621:[function(require,module,exports){
+},{"assert":22,"buffer":58,"debug":417,"dup":366,"traverse":667,"util":396}],654:[function(require,module,exports){
 arguments[4][210][0].apply(exports,arguments)
-},{"./lib/":622,"dup":210}],622:[function(require,module,exports){
+},{"./lib/":655,"dup":210}],655:[function(require,module,exports){
 arguments[4][211][0].apply(exports,arguments)
-},{"./parse":623,"./stringify":624,"dup":211}],623:[function(require,module,exports){
+},{"./parse":656,"./stringify":657,"dup":211}],656:[function(require,module,exports){
 arguments[4][369][0].apply(exports,arguments)
-},{"./utils":625,"dup":369}],624:[function(require,module,exports){
+},{"./utils":658,"dup":369}],657:[function(require,module,exports){
 arguments[4][370][0].apply(exports,arguments)
-},{"./utils":625,"dup":370}],625:[function(require,module,exports){
+},{"./utils":658,"dup":370}],658:[function(require,module,exports){
 arguments[4][371][0].apply(exports,arguments)
-},{"dup":371}],626:[function(require,module,exports){
+},{"dup":371}],659:[function(require,module,exports){
 arguments[4][372][0].apply(exports,arguments)
-},{"_process":279,"dup":372,"stream":349}],627:[function(require,module,exports){
+},{"_process":279,"dup":372,"stream":349}],660:[function(require,module,exports){
 arguments[4][373][0].apply(exports,arguments)
-},{"../package.json":633,"./memstore":628,"./pathMatch":629,"./permuteDomain":630,"./pubsuffix":631,"./store":632,"dup":373,"net":56,"punycode":286,"url":392}],628:[function(require,module,exports){
+},{"../package.json":666,"./memstore":661,"./pathMatch":662,"./permuteDomain":663,"./pubsuffix":664,"./store":665,"dup":373,"net":56,"punycode":286,"url":392}],661:[function(require,module,exports){
 arguments[4][374][0].apply(exports,arguments)
-},{"./pathMatch":629,"./permuteDomain":630,"./store":632,"dup":374,"util":396}],629:[function(require,module,exports){
+},{"./pathMatch":662,"./permuteDomain":663,"./store":665,"dup":374,"util":396}],662:[function(require,module,exports){
 arguments[4][375][0].apply(exports,arguments)
-},{"dup":375}],630:[function(require,module,exports){
+},{"dup":375}],663:[function(require,module,exports){
 arguments[4][376][0].apply(exports,arguments)
-},{"./pubsuffix":631,"dup":376}],631:[function(require,module,exports){
+},{"./pubsuffix":664,"dup":376}],664:[function(require,module,exports){
 arguments[4][377][0].apply(exports,arguments)
-},{"dup":377,"punycode":286}],632:[function(require,module,exports){
+},{"dup":377,"punycode":286}],665:[function(require,module,exports){
 arguments[4][378][0].apply(exports,arguments)
-},{"dup":378}],633:[function(require,module,exports){
+},{"dup":378}],666:[function(require,module,exports){
 module.exports={
   "_args": [
     [
@@ -105522,37 +112180,52 @@ module.exports={
   "version": "2.2.1"
 }
 
-},{}],634:[function(require,module,exports){
+},{}],667:[function(require,module,exports){
 arguments[4][380][0].apply(exports,arguments)
-},{"dup":380}],635:[function(require,module,exports){
+},{"dup":380}],668:[function(require,module,exports){
 arguments[4][381][0].apply(exports,arguments)
-},{"_process":279,"assert":22,"buffer":58,"dup":381,"events":111,"http":350,"https":150,"net":56,"tls":56,"util":396}],636:[function(require,module,exports){
+},{"_process":279,"assert":22,"buffer":58,"dup":381,"events":111,"http":350,"https":150,"net":56,"tls":56,"util":396}],669:[function(require,module,exports){
 arguments[4][382][0].apply(exports,arguments)
-},{"buffer":29,"crypto":29,"dup":382}],637:[function(require,module,exports){
+},{"buffer":29,"crypto":29,"dup":382}],670:[function(require,module,exports){
 arguments[4][383][0].apply(exports,arguments)
-},{"crypto":72,"dup":383}],638:[function(require,module,exports){
+},{"crypto":72,"dup":383}],671:[function(require,module,exports){
 arguments[4][384][0].apply(exports,arguments)
-},{"./decapitalize":641,"./trim":645,"dup":384}],639:[function(require,module,exports){
+},{"./decapitalize":674,"./trim":678,"dup":384}],672:[function(require,module,exports){
 arguments[4][385][0].apply(exports,arguments)
-},{"./helper/makeString":644,"dup":385}],640:[function(require,module,exports){
+},{"./helper/makeString":677,"dup":385}],673:[function(require,module,exports){
 arguments[4][386][0].apply(exports,arguments)
-},{"./camelize":638,"./capitalize":639,"./helper/makeString":644,"dup":386}],641:[function(require,module,exports){
+},{"./camelize":671,"./capitalize":672,"./helper/makeString":677,"dup":386}],674:[function(require,module,exports){
 arguments[4][387][0].apply(exports,arguments)
-},{"./helper/makeString":644,"dup":387}],642:[function(require,module,exports){
+},{"./helper/makeString":677,"dup":387}],675:[function(require,module,exports){
 arguments[4][388][0].apply(exports,arguments)
-},{"./escapeRegExp":643,"dup":388}],643:[function(require,module,exports){
+},{"./escapeRegExp":676,"dup":388}],676:[function(require,module,exports){
 arguments[4][389][0].apply(exports,arguments)
-},{"./makeString":644,"dup":389}],644:[function(require,module,exports){
+},{"./makeString":677,"dup":389}],677:[function(require,module,exports){
 arguments[4][390][0].apply(exports,arguments)
-},{"dup":390}],645:[function(require,module,exports){
+},{"dup":390}],678:[function(require,module,exports){
 arguments[4][391][0].apply(exports,arguments)
-},{"./helper/defaultToWhiteSpace":642,"./helper/makeString":644,"dup":391}],646:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":675,"./helper/makeString":677,"dup":391}],679:[function(require,module,exports){
 arguments[4][394][0].apply(exports,arguments)
-},{"dup":394}],647:[function(require,module,exports){
+},{"dup":394}],680:[function(require,module,exports){
 arguments[4][397][0].apply(exports,arguments)
-},{"assert":22,"dup":397,"extsprintf":428,"util":396}],648:[function(require,module,exports){
+},{"assert":22,"dup":397,"extsprintf":429,"util":396}],681:[function(require,module,exports){
 arguments[4][399][0].apply(exports,arguments)
-},{"dup":399}],"loopback-app":[function(require,module,exports){
+},{"dup":399}],682:[function(require,module,exports){
+module.exports = {
+  "sql_template_source": {
+    "host": "localhost\\sqlexpress",
+    "port": 1433,
+    "database": "test-db",
+    "username": "testadmin",
+    "password": "pwd1234",
+    "connector": "mssql",
+    "options": {
+      "encrypt": "true"
+    }
+  }
+}
+
+},{}],"loopback-app":[function(require,module,exports){
 (function (__dirname){
 var loopback = require('loopback');
 var boot = require('loopback-boot');
@@ -105865,8 +112538,8 @@ module.exports={
           {
             "accessType": "*",
             "principalType": "ROLE",
-            "principalId": "$unauthenticated",
-            "permission": "DENY"
+            "principalId": "tenant-member",
+            "permission": "ALLOW"
           }
         ],
         "methods": {}
@@ -105902,8 +112575,8 @@ module.exports={
           {
             "accessType": "*",
             "principalType": "ROLE",
-            "principalId": "$unauthenticated",
-            "permission": "DENY"
+            "principalId": "tenant-member",
+            "permission": "ALLOW"
           }
         ],
         "methods": {}
@@ -105918,14 +112591,14 @@ module.exports={
   }
 }
 },{}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\access-token.js":[function(require,module,exports){
-arguments[4][520][0].apply(exports,arguments)
-},{"../../lib/loopback":241,"_process":279,"assert":22,"buffer":58,"dup":520,"uid2":383}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\acl.js":[function(require,module,exports){
-arguments[4][522][0].apply(exports,arguments)
-},{"../../lib/access-context":233,"../../lib/loopback":241,"_process":279,"assert":22,"async":23,"debug":73,"dup":522}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\role-mapping.js":[function(require,module,exports){
-arguments[4][532][0].apply(exports,arguments)
-},{"../../lib/loopback":241,"_process":279,"dup":532}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\role.js":[function(require,module,exports){
-arguments[4][534][0].apply(exports,arguments)
-},{"../../lib/access-context":233,"../../lib/loopback":241,"_process":279,"assert":22,"async":23,"debug":73,"dup":534}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\user.js":[function(require,module,exports){
+arguments[4][553][0].apply(exports,arguments)
+},{"../../lib/loopback":241,"_process":279,"assert":22,"buffer":58,"dup":553,"uid2":383}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\acl.js":[function(require,module,exports){
+arguments[4][555][0].apply(exports,arguments)
+},{"../../lib/access-context":233,"../../lib/loopback":241,"_process":279,"assert":22,"async":23,"debug":73,"dup":555}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\role-mapping.js":[function(require,module,exports){
+arguments[4][565][0].apply(exports,arguments)
+},{"../../lib/loopback":241,"_process":279,"dup":565}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\role.js":[function(require,module,exports){
+arguments[4][567][0].apply(exports,arguments)
+},{"../../lib/access-context":233,"../../lib/loopback":241,"_process":279,"assert":22,"async":23,"debug":73,"dup":567}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\user.js":[function(require,module,exports){
 (function (__dirname){
 /*!
  * Module Dependencies.
@@ -106652,13 +113325,14 @@ module.exports = function(User) {
 
 }).call(this,"/node_modules\\loopback\\common\\models")
 },{"../../lib/loopback":241,"../../lib/utils":246,"assert":22,"bcrypt":29,"bcryptjs":25,"crypto":72,"debug":73,"path":274}],"loopback-boot#models#common\\models\\person.js":[function(require,module,exports){
-var ds_mixin = require('./utils/datasource-mixin');
+var ds_mixin = require('./utils/switch-datasource-mixin');
+var dyn_ds_mixin = require('./utils/inject-datasource-mixin');
 
 module.exports = function(model)
 {
-  ds_mixin(model);
+  ds_mixin(model, 0, dyn_ds_mixin);
 };
 
-},{"./utils/datasource-mixin":400}],"loopback-boot#models#common\\models\\pet.js":[function(require,module,exports){
+},{"./utils/inject-datasource-mixin":400,"./utils/switch-datasource-mixin":401}],"loopback-boot#models#common\\models\\pet.js":[function(require,module,exports){
 arguments[4]["loopback-boot#models#common\\models\\person.js"][0].apply(exports,arguments)
-},{"./utils/datasource-mixin":400,"dup":"loopback-boot#models#common\\models\\person.js"}]},{},[]);
+},{"./utils/inject-datasource-mixin":400,"./utils/switch-datasource-mixin":401,"dup":"loopback-boot#models#common\\models\\person.js"}]},{},[]);

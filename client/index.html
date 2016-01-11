@@ -4,7 +4,10 @@
 	[
 		'family1',
 		'family2',
-		'family3'
+		'family3',
+		'sql_familyA',
+		'sql_familyB',
+		'sql_familyC'
 	];
 	var i = 0;
 
@@ -41,11 +44,16 @@
 		i = ++i % sources.length;
 		window.datasource = sources[i];
 		
-		Person.find({include: 'pets'}, function(err, items) {
-		  console.log("2 -> ", items); // => [] of items in the server’s memory db
+		Person.find({ include: 'pets' }, function(err, items) {
+			if (err)
+				document.body.innerHTML = "<b>Query-Error</b>: " + err;
+				
+		  console.log("person-items:", items);
+		  
 		  try
 		  {
 			  console.log("relation-sync: ", items[0].pets());
+			  items[0].pets.count(function(c,cc){console.log("relation-async-count:", cc);});
 		  }
 		  catch(e)
 		  {
@@ -71,5 +79,6 @@
 		});
 	}
 	
-	setInterval(query, 500);
+	setInterval(query, 2500);
+	
 </script>

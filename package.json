@@ -10,6 +10,7 @@
     "cors": "^2.5.2",
     "loopback": "^2.22.0",
     "loopback-boot": "^2.6.5",
+    "loopback-connector-mssql": "^2.3.3",
     "loopback-datasource-juggler": "^2.39.0",
     "serve-favicon": "^2.0.1"
   },
