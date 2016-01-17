@@ -24,10 +24,11 @@ function check_acl(uid, ds_name, cb)
 		cb(new Error("Tenant-ACL: Authorization denied, invalid user-id: " + uid));
 	
 	else if (!acl[ds_name])
-		cb(new Error("Tenant-ACL: Authorization denied, user is not allowed to access this datasource: " + ds_name));
+		// Tenant-ACL: Authorization denied, user is not allowed to access this datasource
+        cb(null, true);
     
     else
-        cb(null, true);
+        cb(null, false);
 }
 
 module.exports = function(app) {
@@ -35,14 +36,7 @@ module.exports = function(app) {
   var Role = app.models.Role;
   
   Role.registerResolver('tenant-member', function(role, context, cb) {
-    
-    function reject(err) {
-      if(err) {
-        return cb(err);
-      }
-      cb(null, false);
-    }
-    
+
     if (context && 
         context.remotingContext && 
         context.remotingContext.req && 

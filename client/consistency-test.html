@@ -70,6 +70,7 @@
 		password: 'test'
 	};
         
+    var start = new Date().getTime();
 	var test_runner;
 	User.login(credentials, function (err, token)
 	{
@@ -82,8 +83,8 @@
 		};
 		
         document.body.innerHTML += 'Logged in: ' + JSON.stringify(remotes.auth.bearer) + '<br>';
-        
-        //test_runner = setInterval(query, 1);
+        document.body.innerHTML += 'Running tests, please wait... (~15-30 sec)';
+
         setTimeout(query, 1);
     });
 	
@@ -93,6 +94,7 @@
     var tests_ok = 0;
     var tests_failed = 0;
     var tests_rejected = 0;
+    var verbose = true;
     
 	var query = function()
 	{
@@ -103,7 +105,7 @@
             
             if (err)
             {
-                document.body.innerHTML += "<b>Query-Error</b>: " + err + '<br>';
+                if (verbose) document.body.innerHTML += "<b>Query-Error</b>: " + err + '<br>';
                 
                 run_idx = ++run_idx % sources.length;
                 app_req_source = sources[run_idx];
@@ -120,12 +122,12 @@
           {
               if (check_value !== ref_value)
               {
-                  document.body.innerHTML += ("[" + curr_run + "] " + family + " &gt; " + check_name + " MISMATCH: " + check_value + " !== " + ref_value) + "<br>";
+                  if (verbose) document.body.innerHTML += ("[" + curr_run + "] " + family + " &gt; " + check_name + " MISMATCH: " + check_value + " !== " + ref_value) + "<br>";
                   ++tests_failed;
               }
               else
               {
-                  document.body.innerHTML += ("[" + curr_run + "] " + family + " &gt; " + check_name + " MATCH: " + check_value + " === " + ref_value) + '<br>';
+                  if (verbose) document.body.innerHTML += ("[" + curr_run + "] " + family + " &gt; " + check_name + " MATCH: " + check_value + " === " + ref_value) + '<br>';
                   ++tests_ok;
               }
           };
@@ -139,11 +141,15 @@
                         
             if (curr_run >= run_limit)
             {
+                var end = new Date().getTime();
+                var time = end - start;
+
                 clearInterval(test_runner);
                 document.body.innerHTML += 'Finished Tests: <br>';
                 document.body.innerHTML += 'Tests-OK: ' + tests_ok + '<br>';
                 document.body.innerHTML += 'Tests-FAILED: ' + tests_failed + '<br>';
                 document.body.innerHTML += 'Tests-REJECTED: ' + tests_rejected + '<br>';
+                document.body.innerHTML += 'Time elapsed: ' + (time*0.001) + ' sec<br>';
                 window.scrollTo(0,document.body.scrollHeight);
                 return;
             }

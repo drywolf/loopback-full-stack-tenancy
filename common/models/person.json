@@ -24,7 +24,7 @@
       "accessType": "*",
       "principalType": "ROLE",
       "principalId": "tenant-member",
-      "permission": "ALLOW"
+      "permission": "DENY"
     }
   ],
   "methods": {}
