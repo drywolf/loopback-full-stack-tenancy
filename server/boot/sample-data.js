@@ -26,7 +26,7 @@ module.exports = function(app) {
   .then(function()
   {
 	  console.log("create John");
-	  return Person.create({name: 'John'});
+	  return Person.create({ name: 'John' });
   })
   .then(function(john)
   {
@@ -42,7 +42,7 @@ module.exports = function(app) {
   .then(function()
   {
 	  console.log("create Simon");
-	  return Person.create({name: 'Simon'});
+	  return Person.create({ name: 'Simon' });
   })
   .then(function(simon)
   {
@@ -58,7 +58,7 @@ module.exports = function(app) {
   .then(function()
   {
 	  console.log("create Walter");
-	  return Person.create({name: 'Walter'});
+	  return Person.create({ name: 'Walter' });
   })
   .then(function(walter)
   {
@@ -70,7 +70,7 @@ module.exports = function(app) {
 	  console.log("Success");
 	  
 	Person.find({include: 'pets'}, function(err, items) {
-	  console.log("2 -> ", items); // => [] of items in the server’s memory db
+	  console.log("2 -> ", items); // => [] of items in the serverï¿½s memory db
 	  try
 	  {
 	  	  console.log("relation-sync: ", items[0].pets());

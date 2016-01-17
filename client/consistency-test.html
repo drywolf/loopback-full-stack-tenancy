@@ -1,0 +1,152 @@
+<script src="bundle.js"></script>
+<script>
+        
+    var check_data = 
+    {
+        'family1':
+        {
+            person: { name: 'John' },
+            pet: { name: 'kitty', species: 'cat' }
+        },
+        'family2':
+        {
+            person: { name: 'Simon' },
+            pet: { name: 'waldo', species: 'dog' }
+        },
+        'family3':
+        {
+            person: { name: 'Walter' },
+            pet: { name: 'goldie', species: 'fish' }
+        },
+        'sql_familyA':
+        {
+            person: { name: 'Sql-Johnny' },
+            pet: { name: 'Sql-Doge', species: 'Dog' }
+        },
+        'sql_familyB':
+        {
+            person: { name: 'Sql-Emma' },
+            pet: { name: 'Sql-Rabbit', species: 'Rabbit' }
+        },
+        'sql_familyC':
+        {
+            person: { name: 'C-Person' },
+            pet: { name: 'C-Pet', species: 'Alien' }
+        }
+    };
+    
+	var sources =
+	[
+		'family1',
+		'family2',
+		'family3',
+		'sql_familyA',
+		'sql_familyB',
+		'sql_familyC'
+	];
+	var i = 0;
+
+	var app = require('loopback-app');
+	
+	var remoteDs = app.dataSources.remoteDS;
+	var remotes = remoteDs.connector.remotes;
+	
+	var User = app.models.User;
+	var Person = app.models.Person;
+    
+    var app_req_source = sources[0];
+    remotes.before('**', function(ctx, next)
+    {
+        ctx.req.headers = 
+        {
+            datasource: app_req_source || 'nullsrc'
+        };
+
+        next();
+    });
+	
+	var credentials = 
+	{
+		email: 'test@test.com',
+		password: 'test'
+	};
+        
+	var test_runner;
+	User.login(credentials, function (err, token)
+	{
+		credentials.token = token;
+		console.log("logged in: ", credentials);
+		
+		remotes.auth = 
+		{
+			bearer: btoa(token ? token.id : 'null'),
+			sendImmediately: true
+		};
+		
+        document.body.innerHTML += 'Logged in: ' + JSON.stringify(remotes.auth.bearer) + '<br>';
+        
+        test_runner = setInterval(query, 1);
+    });
+	
+    var run_limit = 1000;
+    var test_run = 0;
+    var tests_ok = 0;
+    var tests_failed = 0;
+    
+	var query = function()
+	{
+        var curr_family = app_req_source;
+        var curr_run = test_run++;
+        
+		Person.find({ include: 'pets' }, function(err, items) {
+            
+            if (err)
+            {
+                document.body.innerHTML += "<b>Query-Error</b>: " + err + '<br>';
+                
+                i = ++i % sources.length;
+                app_req_source = sources[i];
+                console.log("new source", app_req_source);
+                return;
+            }
+				
+		  console.log("person-items:", items && items.length);
+          var chk = check_data[curr_family];
+          
+          var exec_check =function(family, check_name, check_value, ref_value)
+          {
+              if (check_value !== ref_value)
+              {
+                  document.body.innerHTML += ("[" + curr_run + "] " + family + " &gt; " + check_name + " MISMATCH: " + check_value + " !== " + ref_value) + "<br>";
+                  ++tests_failed;
+              }
+              else
+              {
+                  document.body.innerHTML += ("[" + curr_run + "] " + family + " &gt; " + check_name + " MATCH: " + check_value + " === " + ref_value) + '<br>';
+                  ++tests_ok;
+              }
+          };
+          
+          if (chk && items && items.length > 0)
+          {
+              exec_check(curr_family, 'person-name', chk.person.name, items[0].name);
+              exec_check(curr_family, 'pet-name', chk.pet.name, items[0].pets()[0].name);
+              exec_check(curr_family, 'pet-species', chk.pet.species, items[0].pets()[0].species);
+          }
+            
+            i = ++i % sources.length;
+            app_req_source = sources[i];
+            console.log("new source", app_req_source);
+            
+            if (curr_run >= run_limit)
+            {
+                clearInterval(test_runner);
+                document.body.innerHTML += 'Finished Tests: <br>';
+                document.body.innerHTML += 'Tests-OK: ' + tests_ok + '<br>';
+                document.body.innerHTML += 'Tests-FAILED: ' + tests_failed + '<br>';
+            }
+            
+            window.scrollTo(0,document.body.scrollHeight);
+		});
+	}	
+</script>

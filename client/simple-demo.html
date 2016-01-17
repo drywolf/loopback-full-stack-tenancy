@@ -1,6 +1,6 @@
 <script src="bundle.js"></script>
 <script>
-	var sources =
+    var sources =
 	[
 		'family1',
 		'family2',
@@ -19,6 +19,17 @@
 	var User = app.models.User;
 	var Person = app.models.Person;
 	
+    var app_req_source = sources[0];
+    remotes.before('**', function(ctx, next)
+    {
+        ctx.req.headers = 
+        {
+            datasource: app_req_source || 'nullsrc'
+        };
+
+        next();
+    });
+    
 	var credentials = 
 	{
 		email: 'test@test.com',
@@ -37,16 +48,24 @@
 		};
 		
 		console.log('Set access token for all future requests. (%s)', remotes.auth.bearer);
+        
+        setInterval(query, 1000);
     });
 	
 	var query = function()
 	{
-		i = ++i % sources.length;
-		window.datasource = sources[i];
-		
+        var curr_family = app_req_source;
 		Person.find({ include: 'pets' }, function(err, items) {
-			if (err)
-				document.body.innerHTML = "<b>Query-Error</b>: " + err;
+
+            if (err)
+            {
+                document.body.innerHTML = "<b>Query-Error</b>: " + err + '<br>';
+                
+                i = ++i % sources.length;
+                app_req_source = sources[i];
+                console.log("new source", app_req_source);
+                return;
+            }
 				
 		  console.log("person-items:", items);
 		  
@@ -68,7 +87,7 @@
 			console.log("relation-async: ", pets);
 			
 			document.body.innerHTML = 
-				'DataSource: ' + window.datasource + '<br>' + 
+				'DataSource: ' + curr_family + '<br>' + 
 				'Person: ' + JSON.stringify(items[0]) + '<br>' +
 				'Person\'s Pet: ' + JSON.stringify(pets[0]) + '<br>' + 
 				'Time: ' + new Date();
@@ -76,9 +95,10 @@
 			if (err)
 				console.log("error-async: ", err);
 		  });
+          
+            i = ++i % sources.length;
+            app_req_source = sources[i];
+            console.log("new source", app_req_source);
 		});
 	}
-	
-	setInterval(query, 2500);
-	
 </script>

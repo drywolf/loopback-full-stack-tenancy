@@ -98749,7 +98749,7 @@ module.exports = function(model, ds_name)
 	return ds;
 }
 
-},{"../../../server/sql-server-config.js":682,"loopback":572,"loopback-connector-mssql":479,"loopback-datasource-juggler":520}],401:[function(require,module,exports){
+},{"../../../server/sql-server-config.js":682,"loopback":549,"loopback-connector-mssql":483,"loopback-datasource-juggler":497}],401:[function(require,module,exports){
 var loopback = require('loopback');
 
 module.exports = function(model, debug, dynamic_ds_mixin)
@@ -98759,9 +98759,46 @@ module.exports = function(model, debug, dynamic_ds_mixin)
 	model.beforeRemote('**', function(remotingCtx, unused, next)
 	{
 		model.attachTo(model.app.dataSources.nullsrc);
+        
+        var lct = loopback.getCurrentContext();
+        
+        if (lct)
+            lct.set('req-model', model.modelName);        
+
+        /*var lb_ctx = loopback.getCurrentContext();
+        
+        if (lb_ctx)
+        {
+            var ds = lb_ctx.get('datasource');
+        
+            if (ds)
+            {
+                remotingCtx.options = remotingCtx.options || {};        
+                remotingCtx.options.tenantId = ds;
+            }
+        }*/
+
 		next();
 	});
-	
+    
+    model.observe('access', function limitToTenant(ctx, next)
+    {
+        var lb_ctx = loopback.getCurrentContext();
+        
+        if (lb_ctx)
+        {
+            var ds = lb_ctx.get('datasource');
+        
+            if (ds)
+            {
+                ctx.options = ctx.options || {};        
+                ctx.options.tenantId = ds;
+            }
+        }
+                
+        next();
+    });
+        
     // override this method and return model data from the requested data-source
 	model.getDataSource = function()
     {
@@ -98777,7 +98814,9 @@ module.exports = function(model, debug, dynamic_ds_mixin)
         
         var ds_name = ctx.get('datasource');
         var user_id = ctx.get('user');
-
+        var include = ctx.get('include');
+        var req_model = ctx.get('req-model');
+        
         if (!ds_name)
         {
             if (debug)
@@ -98803,6 +98842,20 @@ module.exports = function(model, debug, dynamic_ds_mixin)
         // NOTE: this is to work arround a bug in the MS SQL connector which does not pass the request context when querying model relations
         model.app.models.Pet.attachTo(ds);
         
+        if (false && req_model === model.modelName && typeof include === 'string')
+        {
+            var relation = model.relations[include];
+            
+            if (relation && relation.modelTo && relation.modelTo.modelName)
+            {
+                var target_mdl_name = relation.modelTo.modelName;
+                var target_mdl = model.app.models[target_mdl_name];
+                
+                if (target_mdl.dataSource.settings.name !== ds.settings.name)
+                    target_mdl.attachTo(ds);
+            }
+        }
+        
         if (model.dataSource.settings.name === ds.settings.name)
         {
             if (debug)
@@ -98820,19 +98873,311 @@ module.exports = function(model, debug, dynamic_ds_mixin)
     }
 }
 
-},{"loopback":572}],402:[function(require,module,exports){
+},{"loopback":549}],402:[function(require,module,exports){
+"use strict";
+
+// rawAsap provides everything we need except exception management.
+var rawAsap = require("./raw");
+// RawTasks are recycled to reduce GC churn.
+var freeTasks = [];
+// We queue errors to ensure they are thrown in right order (FIFO).
+// Array-as-queue is good enough here, since we are just dealing with exceptions.
+var pendingErrors = [];
+var requestErrorThrow = rawAsap.makeRequestCallFromTimer(throwFirstError);
+
+function throwFirstError() {
+    if (pendingErrors.length) {
+        throw pendingErrors.shift();
+    }
+}
+
+/**
+ * Calls a task as soon as possible after returning, in its own event, with priority
+ * over other events like animation, reflow, and repaint. An error thrown from an
+ * event will not interrupt, nor even substantially slow down the processing of
+ * other events, but will be rather postponed to a lower priority event.
+ * @param {{call}} task A callable object, typically a function that takes no
+ * arguments.
+ */
+module.exports = asap;
+function asap(task) {
+    var rawTask;
+    if (freeTasks.length) {
+        rawTask = freeTasks.pop();
+    } else {
+        rawTask = new RawTask();
+    }
+    rawTask.task = task;
+    rawAsap(rawTask);
+}
+
+// We wrap tasks with recyclable task objects.  A task object implements
+// `call`, just like a function.
+function RawTask() {
+    this.task = null;
+}
+
+// The sole purpose of wrapping the task is to catch the exception and recycle
+// the task object after its single use.
+RawTask.prototype.call = function () {
+    try {
+        this.task.call();
+    } catch (error) {
+        if (asap.onerror) {
+            // This hook exists purely for testing purposes.
+            // Its name will be periodically randomized to break any code that
+            // depends on its existence.
+            asap.onerror(error);
+        } else {
+            // In a web browser, exceptions are not fatal. However, to avoid
+            // slowing down the queue of pending tasks, we rethrow the error in a
+            // lower priority turn.
+            pendingErrors.push(error);
+            requestErrorThrow();
+        }
+    } finally {
+        this.task = null;
+        freeTasks[freeTasks.length] = this;
+    }
+};
+
+},{"./raw":403}],403:[function(require,module,exports){
+(function (global){
+"use strict";
+
+// Use the fastest means possible to execute a task in its own turn, with
+// priority over other events including IO, animation, reflow, and redraw
+// events in browsers.
+//
+// An exception thrown by a task will permanently interrupt the processing of
+// subsequent tasks. The higher level `asap` function ensures that if an
+// exception is thrown by a task, that the task queue will continue flushing as
+// soon as possible, but if you use `rawAsap` directly, you are responsible to
+// either ensure that no exceptions are thrown from your task, or to manually
+// call `rawAsap.requestFlush` if an exception is thrown.
+module.exports = rawAsap;
+function rawAsap(task) {
+    if (!queue.length) {
+        requestFlush();
+        flushing = true;
+    }
+    // Equivalent to push, but avoids a function call.
+    queue[queue.length] = task;
+}
+
+var queue = [];
+// Once a flush has been requested, no further calls to `requestFlush` are
+// necessary until the next `flush` completes.
+var flushing = false;
+// `requestFlush` is an implementation-specific method that attempts to kick
+// off a `flush` event as quickly as possible. `flush` will attempt to exhaust
+// the event queue before yielding to the browser's own event loop.
+var requestFlush;
+// The position of the next task to execute in the task queue. This is
+// preserved between calls to `flush` so that it can be resumed if
+// a task throws an exception.
+var index = 0;
+// If a task schedules additional tasks recursively, the task queue can grow
+// unbounded. To prevent memory exhaustion, the task queue will periodically
+// truncate already-completed tasks.
+var capacity = 1024;
+
+// The flush function processes all tasks that have been scheduled with
+// `rawAsap` unless and until one of those tasks throws an exception.
+// If a task throws an exception, `flush` ensures that its state will remain
+// consistent and will resume where it left off when called again.
+// However, `flush` does not make any arrangements to be called again if an
+// exception is thrown.
+function flush() {
+    while (index < queue.length) {
+        var currentIndex = index;
+        // Advance the index before calling the task. This ensures that we will
+        // begin flushing on the next task the task throws an error.
+        index = index + 1;
+        queue[currentIndex].call();
+        // Prevent leaking memory for long chains of recursive calls to `asap`.
+        // If we call `asap` within tasks scheduled by `asap`, the queue will
+        // grow, but to avoid an O(n) walk for every task we execute, we don't
+        // shift tasks off the queue after they have been executed.
+        // Instead, we periodically shift 1024 tasks off the queue.
+        if (index > capacity) {
+            // Manually shift all values starting at the index back to the
+            // beginning of the queue.
+            for (var scan = 0, newLength = queue.length - index; scan < newLength; scan++) {
+                queue[scan] = queue[scan + index];
+            }
+            queue.length -= index;
+            index = 0;
+        }
+    }
+    queue.length = 0;
+    index = 0;
+    flushing = false;
+}
+
+// `requestFlush` is implemented using a strategy based on data collected from
+// every available SauceLabs Selenium web driver worker at time of writing.
+// https://docs.google.com/spreadsheets/d/1mG-5UYGup5qxGdEMWkhP6BWCz053NUb2E1QoUTU16uA/edit#gid=783724593
+
+// Safari 6 and 6.1 for desktop, iPad, and iPhone are the only browsers that
+// have WebKitMutationObserver but not un-prefixed MutationObserver.
+// Must use `global` instead of `window` to work in both frames and web
+// workers. `global` is a provision of Browserify, Mr, Mrs, or Mop.
+var BrowserMutationObserver = global.MutationObserver || global.WebKitMutationObserver;
+
+// MutationObservers are desirable because they have high priority and work
+// reliably everywhere they are implemented.
+// They are implemented in all modern browsers.
+//
+// - Android 4-4.3
+// - Chrome 26-34
+// - Firefox 14-29
+// - Internet Explorer 11
+// - iPad Safari 6-7.1
+// - iPhone Safari 7-7.1
+// - Safari 6-7
+if (typeof BrowserMutationObserver === "function") {
+    requestFlush = makeRequestCallFromMutationObserver(flush);
+
+// MessageChannels are desirable because they give direct access to the HTML
+// task queue, are implemented in Internet Explorer 10, Safari 5.0-1, and Opera
+// 11-12, and in web workers in many engines.
+// Although message channels yield to any queued rendering and IO tasks, they
+// would be better than imposing the 4ms delay of timers.
+// However, they do not work reliably in Internet Explorer or Safari.
+
+// Internet Explorer 10 is the only browser that has setImmediate but does
+// not have MutationObservers.
+// Although setImmediate yields to the browser's renderer, it would be
+// preferrable to falling back to setTimeout since it does not have
+// the minimum 4ms penalty.
+// Unfortunately there appears to be a bug in Internet Explorer 10 Mobile (and
+// Desktop to a lesser extent) that renders both setImmediate and
+// MessageChannel useless for the purposes of ASAP.
+// https://github.com/kriskowal/q/issues/396
+
+// Timers are implemented universally.
+// We fall back to timers in workers in most engines, and in foreground
+// contexts in the following browsers.
+// However, note that even this simple case requires nuances to operate in a
+// broad spectrum of browsers.
+//
+// - Firefox 3-13
+// - Internet Explorer 6-9
+// - iPad Safari 4.3
+// - Lynx 2.8.7
+} else {
+    requestFlush = makeRequestCallFromTimer(flush);
+}
+
+// `requestFlush` requests that the high priority event queue be flushed as
+// soon as possible.
+// This is useful to prevent an error thrown in a task from stalling the event
+// queue if the exception handled by Node.js’s
+// `process.on("uncaughtException")` or by a domain.
+rawAsap.requestFlush = requestFlush;
+
+// To request a high priority event, we induce a mutation observer by toggling
+// the text of a text node between "1" and "-1".
+function makeRequestCallFromMutationObserver(callback) {
+    var toggle = 1;
+    var observer = new BrowserMutationObserver(callback);
+    var node = document.createTextNode("");
+    observer.observe(node, {characterData: true});
+    return function requestCall() {
+        toggle = -toggle;
+        node.data = toggle;
+    };
+}
+
+// The message channel technique was discovered by Malte Ubl and was the
+// original foundation for this library.
+// http://www.nonblocking.io/2011/06/windownexttick.html
+
+// Safari 6.0.5 (at least) intermittently fails to create message ports on a
+// page's first load. Thankfully, this version of Safari supports
+// MutationObservers, so we don't need to fall back in that case.
+
+// function makeRequestCallFromMessageChannel(callback) {
+//     var channel = new MessageChannel();
+//     channel.port1.onmessage = callback;
+//     return function requestCall() {
+//         channel.port2.postMessage(0);
+//     };
+// }
+
+// For reasons explained above, we are also unable to use `setImmediate`
+// under any circumstances.
+// Even if we were, there is another bug in Internet Explorer 10.
+// It is not sufficient to assign `setImmediate` to `requestFlush` because
+// `setImmediate` must be called *by name* and therefore must be wrapped in a
+// closure.
+// Never forget.
+
+// function makeRequestCallFromSetImmediate(callback) {
+//     return function requestCall() {
+//         setImmediate(callback);
+//     };
+// }
+
+// Safari 6.0 has a problem where timers will get lost while the user is
+// scrolling. This problem does not impact ASAP because Safari 6.0 supports
+// mutation observers, so that implementation is used instead.
+// However, if we ever elect to use timers in Safari, the prevalent work-around
+// is to add a scroll event listener that calls for a flush.
+
+// `setTimeout` does not call the passed callback if the delay is less than
+// approximately 7 in web workers in Firefox 8 through 18, and sometimes not
+// even then.
+
+function makeRequestCallFromTimer(callback) {
+    return function requestCall() {
+        // We dispatch a timeout with a specified delay of 0 for engines that
+        // can reliably accommodate that request. This will usually be snapped
+        // to a 4 milisecond delay, but once we're flushing, there's no delay
+        // between events.
+        var timeoutHandle = setTimeout(handleTimer, 0);
+        // However, since this timer gets frequently dropped in Firefox
+        // workers, we enlist an interval handle that will try to fire
+        // an event 20 times per second until it succeeds.
+        var intervalHandle = setInterval(handleTimer, 50);
+
+        function handleTimer() {
+            // Whichever timer succeeds will cancel both timers and
+            // execute the callback.
+            clearTimeout(timeoutHandle);
+            clearInterval(intervalHandle);
+            callback();
+        }
+    };
+}
+
+// This is for `asap.js` only.
+// Its name will be periodically randomized to break any code that depends on
+// its existence.
+rawAsap.makeRequestCallFromTimer = makeRequestCallFromTimer;
+
+// ASAP was originally a nextTick shim included in Q. This was factored out
+// into this ASAP package. It was later adapted to RSVP which made further
+// amendments. These decisions, particularly to marginalize MessageChannel and
+// to capture the MutationObserver implementation in a closure, were integrated
+// back into ASAP proper.
+// https://github.com/tildeio/rsvp.js/blob/cddf7232546a9cf858524b75cde6f9edf72620a7/lib/rsvp/asap.js
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],404:[function(require,module,exports){
 arguments[4][15][0].apply(exports,arguments)
-},{"dup":15}],403:[function(require,module,exports){
+},{"dup":15}],405:[function(require,module,exports){
 arguments[4][16][0].apply(exports,arguments)
-},{"./errors":402,"./reader":404,"./types":405,"./writer":406,"dup":16}],404:[function(require,module,exports){
+},{"./errors":404,"./reader":406,"./types":407,"./writer":408,"dup":16}],406:[function(require,module,exports){
 arguments[4][17][0].apply(exports,arguments)
-},{"./errors":402,"./types":405,"assert":22,"buffer":58,"dup":17}],405:[function(require,module,exports){
+},{"./errors":404,"./types":407,"assert":22,"buffer":58,"dup":17}],407:[function(require,module,exports){
 arguments[4][18][0].apply(exports,arguments)
-},{"dup":18}],406:[function(require,module,exports){
+},{"dup":18}],408:[function(require,module,exports){
 arguments[4][19][0].apply(exports,arguments)
-},{"./errors":402,"./types":405,"assert":22,"buffer":58,"dup":19}],407:[function(require,module,exports){
+},{"./errors":404,"./types":407,"assert":22,"buffer":58,"dup":19}],409:[function(require,module,exports){
 arguments[4][20][0].apply(exports,arguments)
-},{"./ber/index":403,"dup":20}],408:[function(require,module,exports){
+},{"./ber/index":405,"dup":20}],410:[function(require,module,exports){
 (function (Buffer,process){
 // Copyright (c) 2012, Mark Cavage. All rights reserved.
 
@@ -99081,19 +99426,19 @@ Object.keys(assert).forEach(function (k) {
 });
 
 }).call(this,{"isBuffer":require("../../client/node_modules/is-buffer/index.js")},require('_process'))
-},{"../../client/node_modules/is-buffer/index.js":155,"_process":279,"assert":22,"stream":349,"util":396}],409:[function(require,module,exports){
+},{"../../client/node_modules/is-buffer/index.js":155,"_process":279,"assert":22,"stream":349,"util":396}],411:[function(require,module,exports){
 arguments[4][23][0].apply(exports,arguments)
-},{"_process":279,"dup":23}],410:[function(require,module,exports){
+},{"_process":279,"dup":23}],412:[function(require,module,exports){
 arguments[4][24][0].apply(exports,arguments)
-},{"crypto":72,"dup":24,"url":392}],411:[function(require,module,exports){
+},{"crypto":72,"dup":24,"url":392}],413:[function(require,module,exports){
 arguments[4][25][0].apply(exports,arguments)
-},{"_process":279,"crypto":72,"dup":25}],412:[function(require,module,exports){
+},{"_process":279,"crypto":72,"dup":25}],414:[function(require,module,exports){
 arguments[4][26][0].apply(exports,arguments)
-},{"buffer":58,"dup":26,"readable-stream/duplex":604,"util":396}],413:[function(require,module,exports){
+},{"buffer":58,"dup":26,"readable-stream/duplex":595,"util":396}],415:[function(require,module,exports){
 arguments[4][62][0].apply(exports,arguments)
-},{"dup":62}],414:[function(require,module,exports){
+},{"dup":62}],416:[function(require,module,exports){
 arguments[4][63][0].apply(exports,arguments)
-},{"dup":63}],415:[function(require,module,exports){
+},{"dup":63}],417:[function(require,module,exports){
 (function (Buffer){
 var util = require('util');
 var Stream = require('stream').Stream;
@@ -99285,7 +99630,7 @@ CombinedStream.prototype._emitError = function(err) {
 };
 
 }).call(this,{"isBuffer":require("../../../client/node_modules/is-buffer/index.js")})
-},{"../../../client/node_modules/is-buffer/index.js":155,"delayed-stream":419,"stream":349,"util":396}],416:[function(require,module,exports){
+},{"../../../client/node_modules/is-buffer/index.js":155,"delayed-stream":421,"stream":349,"util":396}],418:[function(require,module,exports){
 (function (Buffer){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -99396,35 +99741,36 @@ function objectToString(o) {
 }
 
 }).call(this,{"isBuffer":require("../../../client/node_modules/is-buffer/index.js")})
-},{"../../../client/node_modules/is-buffer/index.js":155}],417:[function(require,module,exports){
+},{"../../../client/node_modules/is-buffer/index.js":155}],419:[function(require,module,exports){
 arguments[4][73][0].apply(exports,arguments)
-},{"./debug":418,"dup":73}],418:[function(require,module,exports){
+},{"./debug":420,"dup":73}],420:[function(require,module,exports){
 arguments[4][74][0].apply(exports,arguments)
-},{"dup":74,"ms":591}],419:[function(require,module,exports){
+},{"dup":74,"ms":568}],421:[function(require,module,exports){
 arguments[4][75][0].apply(exports,arguments)
-},{"dup":75,"stream":349,"util":396}],420:[function(require,module,exports){
+},{"dup":75,"stream":349,"util":396}],422:[function(require,module,exports){
 arguments[4][86][0].apply(exports,arguments)
-},{"_process":279,"dup":86,"stream":349}],421:[function(require,module,exports){
+},{"_process":279,"dup":86,"stream":349}],423:[function(require,module,exports){
 arguments[4][87][0].apply(exports,arguments)
-},{"./lib/ec.js":422,"./lib/sec.js":423,"buffer":58,"crypto":72,"dup":87,"jsbn":474}],422:[function(require,module,exports){
+},{"./lib/ec.js":424,"./lib/sec.js":425,"buffer":58,"crypto":72,"dup":87,"jsbn":476}],424:[function(require,module,exports){
 arguments[4][88][0].apply(exports,arguments)
-},{"dup":88,"jsbn":474}],423:[function(require,module,exports){
+},{"dup":88,"jsbn":476}],425:[function(require,module,exports){
 arguments[4][89][0].apply(exports,arguments)
-},{"./ec.js":422,"dup":89,"jsbn":474}],424:[function(require,module,exports){
+},{"./ec.js":424,"dup":89,"jsbn":476}],426:[function(require,module,exports){
 arguments[4][90][0].apply(exports,arguments)
-},{"../package.json":426,"./utils":425,"dup":90,"fs":56,"path":274}],425:[function(require,module,exports){
+},{"../package.json":428,"./utils":427,"dup":90,"fs":56,"path":274}],427:[function(require,module,exports){
 arguments[4][91][0].apply(exports,arguments)
-},{"dup":91}],426:[function(require,module,exports){
+},{"dup":91}],428:[function(require,module,exports){
 module.exports={
   "_args": [
     [
       "ejs@^2.3.1",
-      "C:\\Users\\wsteiner.LOGICX\\Documents\\ipp-project\\apps\\prototyping\\Prototypes\\loopback-full-stack-tenancy\\node_modules\\loopback"
+      "C:\\Users\\woste\\Documents\\code\\GitHub\\loopback-full-stack-tenancy\\node_modules\\loopback"
     ]
   ],
   "_from": "ejs@>=2.3.1 <3.0.0",
   "_id": "ejs@2.3.4",
   "_inCache": true,
+  "_installable": true,
   "_location": "/ejs",
   "_nodeVersion": "0.12.4",
   "_npmUser": {
@@ -99448,7 +99794,7 @@ module.exports={
   "_shasum": "3c76caa09664b3583b0037af9dc136e79ec68b98",
   "_shrinkwrap": null,
   "_spec": "ejs@^2.3.1",
-  "_where": "C:\\Users\\wsteiner.LOGICX\\Documents\\ipp-project\\apps\\prototyping\\Prototypes\\loopback-full-stack-tenancy\\node_modules\\loopback",
+  "_where": "C:\\Users\\woste\\Documents\\code\\GitHub\\loopback-full-stack-tenancy\\node_modules\\loopback",
   "author": {
     "email": "mde@fleegix.org",
     "name": "Matthew Eernisse",
@@ -99479,13 +99825,12 @@ module.exports={
   "directories": {},
   "dist": {
     "shasum": "3c76caa09664b3583b0037af9dc136e79ec68b98",
-    "tarball": "http://logicxklubuild:4873/ejs/-/ejs-2.3.4.tgz"
+    "tarball": "http://registry.npmjs.org/ejs/-/ejs-2.3.4.tgz"
   },
   "engines": {
     "node": ">=0.10.0"
   },
   "homepage": "https://github.com/mde/ejs",
-  "installable": true,
   "keywords": [
     "ejs",
     "engine",
@@ -99505,6 +99850,7 @@ module.exports={
   ],
   "name": "ejs",
   "optionalDependencies": {},
+  "readme": "ERROR: No README data found!",
   "repository": {
     "type": "git",
     "url": "git://github.com/mde/ejs.git"
@@ -99518,65 +99864,65 @@ module.exports={
   "version": "2.3.4"
 }
 
-},{}],427:[function(require,module,exports){
+},{}],429:[function(require,module,exports){
 arguments[4][110][0].apply(exports,arguments)
-},{"dup":110}],428:[function(require,module,exports){
+},{"dup":110}],430:[function(require,module,exports){
 arguments[4][113][0].apply(exports,arguments)
-},{"dup":113}],429:[function(require,module,exports){
+},{"dup":113}],431:[function(require,module,exports){
 arguments[4][114][0].apply(exports,arguments)
-},{"assert":22,"dup":114,"util":396}],430:[function(require,module,exports){
+},{"assert":22,"dup":114,"util":396}],432:[function(require,module,exports){
 arguments[4][115][0].apply(exports,arguments)
-},{"dup":115,"http":350,"https":150,"net":56,"tls":56,"util":396}],431:[function(require,module,exports){
+},{"dup":115,"http":350,"https":150,"net":56,"tls":56,"util":396}],433:[function(require,module,exports){
 arguments[4][116][0].apply(exports,arguments)
-},{"dup":116}],432:[function(require,module,exports){
+},{"dup":116}],434:[function(require,module,exports){
 arguments[4][117][0].apply(exports,arguments)
-},{"dup":117,"util":396}],433:[function(require,module,exports){
+},{"dup":117,"util":396}],435:[function(require,module,exports){
 arguments[4][118][0].apply(exports,arguments)
-},{"dup":118,"is-property":464}],434:[function(require,module,exports){
+},{"dup":118,"is-property":466}],436:[function(require,module,exports){
 arguments[4][119][0].apply(exports,arguments)
-},{"dup":119}],435:[function(require,module,exports){
+},{"dup":119}],437:[function(require,module,exports){
 arguments[4][120][0].apply(exports,arguments)
-},{"./runner":436,"./schemas":444,"dup":120,"pinkie-promise":597}],436:[function(require,module,exports){
+},{"./runner":438,"./schemas":446,"dup":120,"pinkie-promise":580}],438:[function(require,module,exports){
 arguments[4][121][0].apply(exports,arguments)
-},{"./error":434,"./schemas":444,"dup":121,"is-my-json-valid":462}],437:[function(require,module,exports){
+},{"./error":436,"./schemas":446,"dup":121,"is-my-json-valid":464}],439:[function(require,module,exports){
 arguments[4][122][0].apply(exports,arguments)
-},{"dup":122}],438:[function(require,module,exports){
+},{"dup":122}],440:[function(require,module,exports){
 arguments[4][123][0].apply(exports,arguments)
-},{"dup":123}],439:[function(require,module,exports){
+},{"dup":123}],441:[function(require,module,exports){
 arguments[4][124][0].apply(exports,arguments)
-},{"dup":124}],440:[function(require,module,exports){
+},{"dup":124}],442:[function(require,module,exports){
 arguments[4][125][0].apply(exports,arguments)
-},{"dup":125}],441:[function(require,module,exports){
+},{"dup":125}],443:[function(require,module,exports){
 arguments[4][126][0].apply(exports,arguments)
-},{"dup":126}],442:[function(require,module,exports){
+},{"dup":126}],444:[function(require,module,exports){
 arguments[4][127][0].apply(exports,arguments)
-},{"dup":127}],443:[function(require,module,exports){
+},{"dup":127}],445:[function(require,module,exports){
 arguments[4][128][0].apply(exports,arguments)
-},{"dup":128}],444:[function(require,module,exports){
+},{"dup":128}],446:[function(require,module,exports){
 arguments[4][129][0].apply(exports,arguments)
-},{"./cache.json":437,"./cacheEntry.json":438,"./content.json":439,"./cookie.json":440,"./creator.json":441,"./entry.json":442,"./har.json":443,"./log.json":445,"./page.json":446,"./pageTimings.json":447,"./postData.json":448,"./record.json":449,"./request.json":450,"./response.json":451,"./timings.json":452,"dup":129}],445:[function(require,module,exports){
+},{"./cache.json":439,"./cacheEntry.json":440,"./content.json":441,"./cookie.json":442,"./creator.json":443,"./entry.json":444,"./har.json":445,"./log.json":447,"./page.json":448,"./pageTimings.json":449,"./postData.json":450,"./record.json":451,"./request.json":452,"./response.json":453,"./timings.json":454,"dup":129}],447:[function(require,module,exports){
 arguments[4][130][0].apply(exports,arguments)
-},{"dup":130}],446:[function(require,module,exports){
+},{"dup":130}],448:[function(require,module,exports){
 arguments[4][131][0].apply(exports,arguments)
-},{"dup":131}],447:[function(require,module,exports){
+},{"dup":131}],449:[function(require,module,exports){
 arguments[4][132][0].apply(exports,arguments)
-},{"dup":132}],448:[function(require,module,exports){
+},{"dup":132}],450:[function(require,module,exports){
 arguments[4][133][0].apply(exports,arguments)
-},{"dup":133}],449:[function(require,module,exports){
+},{"dup":133}],451:[function(require,module,exports){
 arguments[4][134][0].apply(exports,arguments)
-},{"dup":134}],450:[function(require,module,exports){
+},{"dup":134}],452:[function(require,module,exports){
 arguments[4][135][0].apply(exports,arguments)
-},{"dup":135}],451:[function(require,module,exports){
+},{"dup":135}],453:[function(require,module,exports){
 arguments[4][136][0].apply(exports,arguments)
-},{"dup":136}],452:[function(require,module,exports){
+},{"dup":136}],454:[function(require,module,exports){
 arguments[4][137][0].apply(exports,arguments)
-},{"dup":137}],453:[function(require,module,exports){
+},{"dup":137}],455:[function(require,module,exports){
 arguments[4][144][0].apply(exports,arguments)
-},{"dup":144}],454:[function(require,module,exports){
+},{"dup":144}],456:[function(require,module,exports){
 arguments[4][145][0].apply(exports,arguments)
-},{"./parser":455,"./signer":456,"./utils":457,"./verify":458,"dup":145}],455:[function(require,module,exports){
+},{"./parser":457,"./signer":458,"./utils":459,"./verify":460,"dup":145}],457:[function(require,module,exports){
 arguments[4][146][0].apply(exports,arguments)
-},{"./utils":457,"assert-plus":408,"dup":146,"util":396}],456:[function(require,module,exports){
+},{"./utils":459,"assert-plus":410,"dup":146,"util":396}],458:[function(require,module,exports){
 (function (Buffer){
 // Copyright 2012 Joyent, Inc.  All rights reserved.
 
@@ -99974,37 +100320,37 @@ module.exports = {
 };
 
 }).call(this,{"isBuffer":require("../../../client/node_modules/is-buffer/index.js")})
-},{"../../../client/node_modules/is-buffer/index.js":155,"./utils":457,"assert-plus":408,"crypto":72,"http":350,"jsprim":478,"sshpk":635,"util":396}],457:[function(require,module,exports){
+},{"../../../client/node_modules/is-buffer/index.js":155,"./utils":459,"assert-plus":410,"crypto":72,"http":350,"jsprim":480,"sshpk":626,"util":396}],459:[function(require,module,exports){
 arguments[4][148][0].apply(exports,arguments)
-},{"assert-plus":408,"dup":148,"sshpk":635,"util":396}],458:[function(require,module,exports){
+},{"assert-plus":410,"dup":148,"sshpk":626,"util":396}],460:[function(require,module,exports){
 arguments[4][149][0].apply(exports,arguments)
-},{"./utils":457,"assert-plus":408,"buffer":58,"crypto":72,"dup":149,"sshpk":635}],459:[function(require,module,exports){
+},{"./utils":459,"assert-plus":410,"buffer":58,"crypto":72,"dup":149,"sshpk":626}],461:[function(require,module,exports){
 arguments[4][153][0].apply(exports,arguments)
-},{"dup":153}],460:[function(require,module,exports){
+},{"dup":153}],462:[function(require,module,exports){
 arguments[4][154][0].apply(exports,arguments)
-},{"dup":154}],461:[function(require,module,exports){
+},{"dup":154}],463:[function(require,module,exports){
 arguments[4][156][0].apply(exports,arguments)
-},{"dup":156}],462:[function(require,module,exports){
+},{"dup":156}],464:[function(require,module,exports){
 arguments[4][157][0].apply(exports,arguments)
-},{"./formats":461,"dup":157,"generate-function":432,"generate-object-property":433,"jsonpointer":477,"xtend":463}],463:[function(require,module,exports){
+},{"./formats":463,"dup":157,"generate-function":434,"generate-object-property":435,"jsonpointer":479,"xtend":465}],465:[function(require,module,exports){
 arguments[4][158][0].apply(exports,arguments)
-},{"dup":158}],464:[function(require,module,exports){
+},{"dup":158}],466:[function(require,module,exports){
 arguments[4][159][0].apply(exports,arguments)
-},{"dup":159}],465:[function(require,module,exports){
+},{"dup":159}],467:[function(require,module,exports){
 arguments[4][160][0].apply(exports,arguments)
-},{"dup":160}],466:[function(require,module,exports){
+},{"dup":160}],468:[function(require,module,exports){
 arguments[4][161][0].apply(exports,arguments)
-},{"dup":161}],467:[function(require,module,exports){
+},{"dup":161}],469:[function(require,module,exports){
 arguments[4][162][0].apply(exports,arguments)
-},{"dup":162,"stream":349}],468:[function(require,module,exports){
+},{"dup":162,"stream":349}],470:[function(require,module,exports){
 arguments[4][163][0].apply(exports,arguments)
-},{"./lib/curve255":470,"./lib/dh":471,"./lib/eddsa":472,"./lib/utils":473,"dup":163}],469:[function(require,module,exports){
+},{"./lib/curve255":472,"./lib/dh":473,"./lib/eddsa":474,"./lib/utils":475,"dup":163}],471:[function(require,module,exports){
 arguments[4][164][0].apply(exports,arguments)
-},{"crypto":72,"dup":164}],470:[function(require,module,exports){
+},{"crypto":72,"dup":164}],472:[function(require,module,exports){
 arguments[4][165][0].apply(exports,arguments)
-},{"./core":469,"./utils":473,"dup":165}],471:[function(require,module,exports){
+},{"./core":471,"./utils":475,"dup":165}],473:[function(require,module,exports){
 arguments[4][166][0].apply(exports,arguments)
-},{"./core":469,"./curve255":470,"./utils":473,"buffer":58,"dup":166}],472:[function(require,module,exports){
+},{"./core":471,"./curve255":472,"./utils":475,"buffer":58,"dup":166}],474:[function(require,module,exports){
 (function (Buffer){
 "use strict";
 /**
@@ -100581,23 +100927,208 @@ var crypto = require('crypto');
 module.exports = ns;
 
 }).call(this,{"isBuffer":require("../../../client/node_modules/is-buffer/index.js")})
-},{"../../../client/node_modules/is-buffer/index.js":155,"./core":469,"./curve255":470,"./utils":473,"crypto":72,"jsbn":474}],473:[function(require,module,exports){
+},{"../../../client/node_modules/is-buffer/index.js":155,"./core":471,"./curve255":472,"./utils":475,"crypto":72,"jsbn":476}],475:[function(require,module,exports){
 arguments[4][168][0].apply(exports,arguments)
-},{"./core":469,"dup":168}],474:[function(require,module,exports){
+},{"./core":471,"dup":168}],476:[function(require,module,exports){
 arguments[4][169][0].apply(exports,arguments)
-},{"dup":169}],475:[function(require,module,exports){
+},{"dup":169}],477:[function(require,module,exports){
 arguments[4][170][0].apply(exports,arguments)
-},{"dup":170}],476:[function(require,module,exports){
+},{"dup":170}],478:[function(require,module,exports){
 arguments[4][171][0].apply(exports,arguments)
-},{"dup":171}],477:[function(require,module,exports){
+},{"dup":171}],479:[function(require,module,exports){
 arguments[4][172][0].apply(exports,arguments)
-},{"dup":172}],478:[function(require,module,exports){
+},{"dup":172}],480:[function(require,module,exports){
 arguments[4][173][0].apply(exports,arguments)
-},{"assert":22,"dup":173,"extsprintf":429,"json-schema":475,"util":396,"verror":680}],479:[function(require,module,exports){
+},{"assert":22,"dup":173,"extsprintf":431,"json-schema":477,"util":396,"verror":680}],481:[function(require,module,exports){
+module.exports = require('./lib/jwt');
+
+},{"./lib/jwt":482}],482:[function(require,module,exports){
+(function (Buffer){
+/*
+ * jwt-simple
+ *
+ * JSON Web Token encode and decode module for node.js
+ *
+ * Copyright(c) 2011 Kazuhito Hokamura
+ * MIT Licensed
+ */
+
+/**
+ * module dependencies
+ */
+var crypto = require('crypto');
+
+
+/**
+ * support algorithm mapping
+ */
+var algorithmMap = {
+  HS256: 'sha256',
+  HS384: 'sha384',
+  HS512: 'sha512',
+  RS256: 'RSA-SHA256'
+};
+
+/**
+ * Map algorithm to hmac or sign type, to determine which crypto function to use
+ */
+var typeMap = {
+  HS256: 'hmac',
+  HS384: 'hmac',
+  HS512: 'hmac',
+  RS256: 'sign'
+};
+
+
+/**
+ * expose object
+ */
+var jwt = module.exports;
+
+
+/**
+ * version
+ */
+jwt.version = '0.2.0';
+
+/**
+ * Decode jwt 
+ *
+ * @param {Object} token
+ * @param {String} key 
+ * @param {Boolean} noVerify 
+ * @return {Object} payload
+ * @api public
+ */
+jwt.decode = function jwt_decode(token, key, noVerify) {
+  // check seguments
+  var segments = token.split('.');
+  if (segments.length !== 3) {
+    throw new Error('Not enough or too many segments');
+  }
+
+  // All segment should be base64
+  var headerSeg = segments[0];
+  var payloadSeg = segments[1];
+  var signatureSeg = segments[2];
+
+  // base64 decode and parse JSON
+  var header = JSON.parse(base64urlDecode(headerSeg));
+  var payload = JSON.parse(base64urlDecode(payloadSeg));
+
+  if (!noVerify) {
+    var signingMethod = algorithmMap[header.alg];
+    var signingType = typeMap[header.alg];
+    if (!signingMethod || !signingType) {
+      throw new Error('Algorithm not supported');
+    }
+  
+    // verify signature. `sign` will return base64 string.
+    var signingInput = [headerSeg, payloadSeg].join('.');
+    if (!verify(signingInput, key, signingMethod, signingType, signatureSeg)) {
+      throw new Error('Signature verification failed');
+    }
+  }
+
+  return payload;
+};
+
+
+/**
+ * Encode jwt
+ *
+ * @param {Object} payload
+ * @param {String} key 
+ * @param {String} algorithm 
+ * @return {String} token
+ * @api public
+ */
+jwt.encode = function jwt_encode(payload, key, algorithm) {
+  // Check key
+  if (!key) {
+    throw new Error('Require key');
+  }
+
+  // Check algorithm, default is HS256
+  if (!algorithm) {
+    algorithm = 'HS256';
+  }
+
+  var signingMethod = algorithmMap[algorithm];
+  var signingType = typeMap[algorithm];
+  if (!signingMethod || !signingType) {
+    throw new Error('Algorithm not supported');
+  }
+
+  // header, typ is fixed value.
+  var header = { typ: 'JWT', alg: algorithm };
+
+  // create segments, all segment should be base64 string
+  var segments = [];
+  segments.push(base64urlEncode(JSON.stringify(header)));
+  segments.push(base64urlEncode(JSON.stringify(payload)));
+  segments.push(sign(segments.join('.'), key, signingMethod, signingType));
+  
+  return segments.join('.');
+}
+
+
+/**
+ * private util functions
+ */
+
+function verify(input, key, method, type, signature) {
+  if(type === "hmac") {
+    return (signature === sign(input, key, method, type));
+  }
+  else if(type == "sign") {
+    return crypto.createVerify(method)
+                 .update(input)
+                 .verify(key, base64urlUnescape(signature), 'base64');
+  }
+  else {
+    throw new Error('Algorithm type not recognized');
+  }
+}
+
+function sign(input, key, method, type) {
+  var base64str;
+  if(type === "hmac") {
+    base64str = crypto.createHmac(method, key).update(input).digest('base64');
+  }
+  else if(type == "sign") {
+    base64str = crypto.createSign(method).update(input).sign(key, 'base64');
+  }
+  else {
+    throw new Error('Algorithm type not recognized');
+  }
+
+  return base64urlEscape(base64str);
+}
+
+function base64urlDecode(str) {
+  return new Buffer(base64urlUnescape(str), 'base64').toString();
+}
+
+function base64urlUnescape(str) {
+  str += Array(5 - str.length % 4).join('=');
+  return str.replace(/\-/g, '+').replace(/_/g, '/');
+}
+
+function base64urlEncode(str) {
+  return base64urlEscape(new Buffer(str).toString('base64'));
+}
+
+function base64urlEscape(str) {
+  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+}).call(this,require("buffer").Buffer)
+},{"buffer":58,"crypto":72}],483:[function(require,module,exports){
 require('strongloop-license')('connectors:mssql');
 module.exports = require("./lib/mssql.js");
 
-},{"./lib/mssql.js":482,"strongloop-license":500}],480:[function(require,module,exports){
+},{"./lib/mssql.js":486,"strongloop-license":652}],484:[function(require,module,exports){
 module.exports = mixinDiscovery;
 
 function mixinDiscovery(MsSQL) {
@@ -101047,7 +101578,7 @@ function mixinDiscovery(MsSQL) {
   }
 }
 
-},{"async":409}],481:[function(require,module,exports){
+},{"async":411}],485:[function(require,module,exports){
 (function (process){
 var async = require('async');
 
@@ -101612,7 +102143,7 @@ function mixinMigration(MsSQL) {
 }
 
 }).call(this,require('_process'))
-},{"_process":279,"async":409}],482:[function(require,module,exports){
+},{"_process":279,"async":411}],486:[function(require,module,exports){
 (function (process){
 /*! Module dependencies */
 var mssql = require("mssql");
@@ -102061,7 +102592,7 @@ require('./migration')(MsSQL, mssql);
 require('./transaction')(MsSQL, mssql);
 
 }).call(this,require('_process'))
-},{"./discovery":480,"./migration":481,"./transaction":483,"_process":279,"debug":417,"loopback-connector":514,"mssql":484,"util":396}],483:[function(require,module,exports){
+},{"./discovery":484,"./migration":485,"./transaction":487,"_process":279,"debug":419,"loopback-connector":491,"mssql":569,"util":396}],487:[function(require,module,exports){
 var debug = require('debug')('loopback:connector:mssql:transaction');
 
 module.exports = mixinTransaction;
@@ -102106,9 +102637,4817 @@ function mixinTransaction(MsSQL, mssql) {
   };
 }
 
-},{"debug":417}],484:[function(require,module,exports){
+},{"debug":419}],488:[function(require,module,exports){
+arguments[4][176][0].apply(exports,arguments)
+},{"./lib/remote-connector":490,"dup":176}],489:[function(require,module,exports){
+/*!
+ * Dependencies
+ */
+var relation = require('loopback-datasource-juggler/lib/relation-definition');
+var RelationDefinition = relation.RelationDefinition;
+
+module.exports = RelationMixin;
+
+/**
+ * RelationMixin class.  Use to define relationships between models.
+ *
+ * @class RelationMixin
+ */
+function RelationMixin() {
+}
+
+/**
+ * Define a "one to many" relationship by specifying the model name
+ *
+ * Examples:
+ * ```
+ * User.hasMany(Post, {as: 'posts', foreignKey: 'authorId'});
+ * ```
+ *
+ * ```
+ * Book.hasMany(Chapter);
+ * ```
+ * Or, equivalently:
+ * ```
+ * Book.hasMany('chapters', {model: Chapter});
+ * ```
+ *
+ * Query and create related models:
+ *
+ * ```js
+ * Book.create(function(err, book) {
+ * 
+ *   // Create a chapter instance ready to be saved in the data source.
+ *   var chapter = book.chapters.build({name: 'Chapter 1'});
+ * 
+ *   // Save the new chapter
+ *   chapter.save();
+ * 
+ *  // you can also call the Chapter.create method with the `chapters` property which will build a chapter
+ *  // instance and save the it in the data source.
+ *  book.chapters.create({name: 'Chapter 2'}, function(err, savedChapter) {
+ *  // this callback is optional
+ *  });
+ * 
+ *   // Query chapters for the book  
+ *   book.chapters(function(err, chapters) {  // all chapters with bookId = book.id 
+ *     console.log(chapters);
+ *   });
+ * 
+ *   book.chapters({where: {name: 'test'}, function(err, chapters) {
+ *    // All chapters with bookId = book.id and name = 'test'
+ *     console.log(chapters);
+ *   });
+ * });
+ *```
+ * @param {Object|String} modelTo Model object (or String name of model) to which you are creating the relationship.
+ * @options {Object} parameters Configuration parameters; see below.
+ * @property {String} as Name of the property in the referring model that corresponds to the foreign key field in the related model.
+ * @property {String} foreignKey Property name of foreign key field.
+ * @property {Object} model Model object
+ */
+RelationMixin.hasMany = function hasMany(modelTo, params) {
+  var def = RelationDefinition.hasMany(this, modelTo, params);
+  this.dataSource.adapter.resolve(this);
+  defineRelationProperty(this, def);
+};
+
+/**
+ * Declare "belongsTo" relation that sets up a one-to-one connection with another model, such that each
+ * instance of the declaring model "belongs to" one instance of the other model.
+ *
+ * For example, if an application includes users and posts, and each post can be written by exactly one user.
+ * The following code specifies that `Post` has a reference called `author` to the `User` model via the `userId` property of `Post`
+ * as the foreign key.
+ * ```
+ * Post.belongsTo(User, {as: 'author', foreignKey: 'userId'});
+ * ```
+ * You can then access the author in one of the following styles.
+ * Get the User object for the post author asynchronously:
+ * ```
+ * post.author(callback);
+ * ```
+ * Get the User object for the post author synchronously:
+ * ```
+ * post.author();
+ * Set the author to be the given user:
+ * ```
+ * post.author(user)
+ * ```
+ * Examples:
+ *
+ * Suppose the model Post has a *belongsTo* relationship with User (the author of the post). You could declare it this way:
+ * ```js
+ * Post.belongsTo(User, {as: 'author', foreignKey: 'userId'});
+ * ```
+ *
+ * When a post is loaded, you can load the related author with:
+ * ```js
+ * post.author(function(err, user) {
+ *     // the user variable is your user object
+ * });
+ * ```
+ *
+ * The related object is cached, so if later you try to get again the author, no additional request will be made.
+ * But there is an optional boolean parameter in first position that set whether or not you want to reload the cache:
+ * ```js
+ * post.author(true, function(err, user) {
+ *     // The user is reloaded, even if it was already cached.
+ * });
+ * ```
+ * This optional parameter default value is false, so the related object will be loaded from cache if available.
+ *
+ * @param {Class|String} modelTo Model object (or String name of model) to which you are creating the relationship.
+ * @options {Object} params Configuration parameters; see below.
+ * @property {String} as Name of the property in the referring model that corresponds to the foreign key field in the related model.
+ * @property {String} foreignKey Name of foreign key property.
+ *
+ */
+RelationMixin.belongsTo = function(modelTo, params) {
+  var def = RelationDefinition.belongsTo(this, modelTo, params);
+  this.dataSource.adapter.resolve(this);
+  defineRelationProperty(this, def);
+};
+
+/**
+ * A hasAndBelongsToMany relation creates a direct many-to-many connection with another model, with no intervening model.
+ * For example, if your application includes users and groups, with each group having many users and each user appearing
+ * in many groups, you could declare the models this way:
+ * ```
+ *  User.hasAndBelongsToMany('groups', {model: Group, foreignKey: 'groupId'});
+ * ```
+ *  Then, to get the groups to which the user belongs:
+ * ```
+ *  user.groups(callback);
+ * ```
+ *  Create a new group and connect it with the user:
+ * ```
+ *  user.groups.create(data, callback);
+ * ```
+ *  Connect an existing group with the user:
+ * ```
+ *  user.groups.add(group, callback);
+ * ```
+ *  Remove the user from the group:
+ * ```
+ *  user.groups.remove(group, callback);
+ * ```
+ *
+ * @param {String|Object} modelTo Model object (or String name of model) to which you are creating the relationship.
+ * the relation
+ * @options {Object} params Configuration parameters; see below.
+ * @property {String} as Name of the property in the referring model that corresponds to the foreign key field in the related model.
+ * @property {String} foreignKey Property name of foreign key field.
+ * @property {Object} model Model object
+ */
+RelationMixin.hasAndBelongsToMany =
+  function hasAndBelongsToMany(modelTo, params) {
+    var def = RelationDefinition.hasAndBelongsToMany(this, modelTo, params);
+    this.dataSource.adapter.resolve(this);
+    defineRelationProperty(this, def);
+  };
+
+RelationMixin.hasOne = function hasOne(modelTo, params) {
+  var def = RelationDefinition.hasOne(this, modelTo, params);
+  this.dataSource.adapter.resolve(this);
+  defineRelationProperty(this, def);
+};
+
+RelationMixin.referencesMany = function referencesMany(modelTo, params) {
+  var def = RelationDefinition.referencesMany(this, modelTo, params);
+  this.dataSource.adapter.resolve(this);
+  defineRelationProperty(this, def);
+};
+
+RelationMixin.embedsOne = function embedsOne(modelTo, params) {
+  var def = RelationDefinition.embedsOne(this, modelTo, params);
+  this.dataSource.adapter.resolve(this);
+  defineRelationProperty(this, def);
+};
+
+RelationMixin.embedsMany = function embedsMany(modelTo, params) {
+  var def = RelationDefinition.embedsMany(this, modelTo, params);
+  this.dataSource.adapter.resolve(this);
+  defineRelationProperty(this, def);
+};
+
+function defineRelationProperty(modelClass, def) {
+  Object.defineProperty(modelClass.prototype, def.name, {
+    get: function() {
+      var that = this;
+      var scope = function() {
+        return that['__get__' + def.name].apply(that, arguments);
+      };
+      scope.count = function() {
+        return that['__count__' + def.name].apply(that, arguments);
+      };
+      scope.create = function() {
+        return that['__create__' + def.name].apply(that, arguments);
+      };
+      scope.deleteById = destroyById = function() {
+        return that['__destroyById__' + def.name].apply(that, arguments);
+      };
+      scope.exists = function() {
+        return that['__exists__' + def.name].apply(that, arguments);
+      };
+      scope.findById = function() {
+        return that['__findById__' + def.name].apply(that, arguments);
+      };
+      return scope;
+    }
+  });
+}
+},{"loopback-datasource-juggler/lib/relation-definition":514}],490:[function(require,module,exports){
+(function (process){
+/**
+ * Dependencies.
+ */
+
+var assert = require('assert');
+var remoting = require('strong-remoting');
+var jutil = require('loopback-datasource-juggler/lib/jutil');
+var RelationMixin = require('./relations');
+
+/**
+ * Export the RemoteConnector class.
+ */
+
+module.exports = RemoteConnector;
+
+/**
+ * Create an instance of the connector with the given `settings`.
+ */
+
+function RemoteConnector(settings) {
+  assert(typeof settings ===
+    'object',
+    'cannot initiaze RemoteConnector without a settings object');
+  this.client = settings.client;
+  this.adapter = settings.adapter || 'rest';
+  this.protocol = settings.protocol || 'http'
+  this.root = settings.root || '';
+  this.host = settings.host || 'localhost';
+  this.port = settings.port || 3000;
+  this.remotes = remoting.create();
+  this.name = 'remote-connector';
+
+  if (settings.url) {
+    this.url = settings.url;
+  } else {
+    this.url = this.protocol + '://' + this.host + ':' + this.port + this.root;
+  }
+
+  // handle mixins in the define() method
+  var DAO = this.DataAccessObject = function() {
+  };
+}
+
+RemoteConnector.prototype.connect = function() {
+  this.remotes.connect(this.url, this.adapter);
+};
+
+RemoteConnector.initialize = function(dataSource, callback) {
+  var connector = dataSource.connector =
+    new RemoteConnector(dataSource.settings);
+  connector.connect();
+  process.nextTick(callback);
+};
+
+RemoteConnector.prototype.define = function(definition) {
+  var Model = definition.model;
+  var remotes = this.remotes;
+
+  assert(Model.sharedClass,
+      'cannot attach ' +
+      Model.modelName +
+      ' to a remote connector without a Model.sharedClass');
+
+  jutil.mixin(Model, RelationMixin);
+  remotes.addClass(Model.sharedClass);
+  this.resolve(Model);
+};
+
+RemoteConnector.prototype.resolve = function(Model) {
+  var remotes = this.remotes;
+
+  Model.sharedClass.methods().forEach(function(remoteMethod) {
+    if (remoteMethod.name !== 'Change' && remoteMethod.name !== 'Checkpoint') {
+      createProxyMethod(Model, remotes, remoteMethod);
+    }
+  });
+};
+
+function createProxyMethod(Model, remotes, remoteMethod) {
+  var scope = remoteMethod.isStatic ? Model : Model.prototype;
+  var original = scope[remoteMethod.name];
+
+  scope[remoteMethod.name] = function remoteMethodProxy() {
+    var args = Array.prototype.slice.call(arguments);
+    var lastArgIsFunc = typeof args[args.length - 1] === 'function';
+    var callback;
+    if (lastArgIsFunc) {
+      callback = args.pop();
+    }
+
+    if (remoteMethod.isStatic) {
+      return remotes.invoke(remoteMethod.stringName, args, callback);
+    }
+
+    var ctorArgs = [this.id];
+    return remotes.invoke(remoteMethod.stringName, ctorArgs, args, callback);
+  }
+}
+
+function noop() {
+}
+
+}).call(this,require('_process'))
+},{"./relations":489,"_process":279,"assert":22,"loopback-datasource-juggler/lib/jutil":507,"strong-remoting":638}],491:[function(require,module,exports){
+arguments[4][179][0].apply(exports,arguments)
+},{"./lib/connector":492,"./lib/sql":494,"./lib/transaction":495,"dup":179}],492:[function(require,module,exports){
+arguments[4][180][0].apply(exports,arguments)
+},{"_process":279,"debug":419,"dup":180}],493:[function(require,module,exports){
+arguments[4][181][0].apply(exports,arguments)
+},{"assert":22,"dup":181}],494:[function(require,module,exports){
+arguments[4][182][0].apply(exports,arguments)
+},{"./connector":492,"./parameterized-sql":493,"./transaction":495,"_process":279,"assert":22,"async":496,"debug":419,"dup":182,"util":396}],495:[function(require,module,exports){
+arguments[4][183][0].apply(exports,arguments)
+},{"assert":22,"debug":419,"dup":183,"events":111,"util":396}],496:[function(require,module,exports){
+arguments[4][184][0].apply(exports,arguments)
+},{"_process":279,"dup":184}],497:[function(require,module,exports){
+arguments[4][185][0].apply(exports,arguments)
+},{"./lib/datasource.js":501,"./lib/geo.js":502,"./lib/model-builder.js":510,"./lib/model.js":512,"./lib/validations.js":520,"./package.json":527,"dup":185,"loopback-connector":491}],498:[function(require,module,exports){
+arguments[4][186][0].apply(exports,arguments)
+},{"_process":279,"dup":186}],499:[function(require,module,exports){
+arguments[4][187][0].apply(exports,arguments)
+},{"../geo":502,"../utils":519,"_process":279,"async":521,"dup":187,"fs":56,"loopback-connector":491,"util":396}],500:[function(require,module,exports){
+arguments[4][188][0].apply(exports,arguments)
+},{"./connectors/memory":499,"./geo":502,"./include.js":504,"./jutil":507,"./list.js":508,"./model":512,"./relations.js":515,"./scope.js":516,"./transaction":517,"./utils":519,"./validations":520,"_process":279,"assert":22,"async":521,"debug":419,"dup":188,"util":396}],501:[function(require,module,exports){
+arguments[4][189][0].apply(exports,arguments)
+},{"./dao.js":500,"./jutil":507,"./model-builder.js":510,"./model-definition.js":511,"./model.js":512,"./observer":513,"./relation-definition.js":514,"./scope.js":516,"./utils":519,"_process":279,"assert":22,"async":521,"debug":419,"dup":189,"events":111,"traverse":666,"util":396}],502:[function(require,module,exports){
+arguments[4][190][0].apply(exports,arguments)
+},{"assert":22,"dup":190}],503:[function(require,module,exports){
+arguments[4][191][0].apply(exports,arguments)
+},{"depd":498,"dup":191}],504:[function(require,module,exports){
+(function (process){
+var async = require('async');
+var utils = require('./utils');
+var List = require('./list');
+var includeUtils = require('./include_utils');
+var isPlainObject = utils.isPlainObject;
+var defineCachedRelations = utils.defineCachedRelations;
+var uniq = utils.uniq;
+
+/*!
+ * Normalize the include to be an array
+ * @param include
+ * @returns {*}
+ */
+function normalizeInclude(include) {
+  var newInclude;
+  if (typeof include === 'string') {
+    return [include];
+  } else if (isPlainObject(include)) {
+    // Build an array of key/value pairs
+    newInclude = [];
+    var rel = include.rel || include.relation;
+    var obj = {};
+    if (typeof rel === 'string') {
+      obj[rel] = new IncludeScope(include.scope);
+      newInclude.push(obj);
+    } else {
+      for (var key in include) {
+        obj[key] = include[key];
+        newInclude.push(obj);
+      }
+    }
+    return newInclude;
+  } else if (Array.isArray(include)) {
+    newInclude = [];
+    for (var i = 0, n = include.length; i < n; i++) {
+      var subIncludes = normalizeInclude(include[i]);
+      newInclude = newInclude.concat(subIncludes);
+    }
+    return newInclude;
+  } else {
+    return include;
+  }
+}
+
+function IncludeScope(scope) {
+  this._scope = utils.deepMerge({}, scope || {});
+  if (this._scope.include) {
+    this._include = normalizeInclude(this._scope.include);
+    delete this._scope.include;
+  } else {
+    this._include = null;
+  }
+};
+
+IncludeScope.prototype.conditions = function() {
+  return utils.deepMerge({}, this._scope);
+};
+
+IncludeScope.prototype.include = function() {
+  return this._include;
+};
+
+/**
+ * Find the idKey of a Model.
+ * @param {ModelConstructor} m - Model Constructor
+ * @returns {String}
+ */
+function idName(m) {
+  return m.definition.idName() || 'id';
+}
+
+/*!
+ * Look up a model by name from the list of given models
+ * @param {Object} models Models keyed by name
+ * @param {String} modelName The model name
+ * @returns {*} The matching model class
+ */
+function lookupModel(models, modelName) {
+  if (models[modelName]) {
+    return models[modelName];
+  }
+  var lookupClassName = modelName.toLowerCase();
+  for (var name in models) {
+    if (name.toLowerCase() === lookupClassName) {
+      return models[name];
+    }
+  }
+}
+
+/**
+ * Utility Function to allow interleave before and after high computation tasks
+ * @param tasks
+ * @param callback
+ */
+function execTasksWithInterLeave(tasks, callback) {
+  //let's give others some time to process.
+  //Context Switch BEFORE Heavy Computation
+  process.nextTick(function () {
+    //Heavy Computation
+    async.parallel(tasks, function (err, info) {
+      //Context Switch AFTER Heavy Computation
+      process.nextTick(function () {
+        callback(err, info);
+      });
+    });
+  });
+}
+
+/*!
+ * Include mixin for ./model.js
+ */
+module.exports = Inclusion;
+
+/**
+ * Inclusion - Model mixin.
+ *
+ * @class
+ */
+
+function Inclusion() {
+}
+
+/**
+ * Normalize includes - used in DataAccessObject
+ *
+ */
+
+Inclusion.normalizeInclude = normalizeInclude;
+
+/**
+ * Enables you to load relations of several objects and optimize numbers of requests.
+ *
+ * Examples:
+ *
+ * Load all users' posts with only one additional request:
+ * `User.include(users, 'posts', function() {});`
+ * Or
+ * `User.include(users, ['posts'], function() {});`
+ *
+ * Load all users posts and passports with two additional requests:
+ * `User.include(users, ['posts', 'passports'], function() {});`
+ *
+ * Load all passports owner (users), and all posts of each owner loaded:
+ *```Passport.include(passports, {owner: 'posts'}, function() {});
+ *``` Passport.include(passports, {owner: ['posts', 'passports']});
+ *``` Passport.include(passports, {owner: [{posts: 'images'}, 'passports']});
+ *
+ * @param {Array} objects Array of instances
+ * @param {String|Object|Array} include Which relations to load.
+ * @param {Object} [options] Options for CRUD
+ * @param {Function} cb Callback called when relations are loaded
+ *
+ */
+Inclusion.include = function (objects, include, options, cb) {
+  if (typeof options === 'function' && cb === undefined) {
+    cb = options;
+    options = {};
+  }
+  var self = this;
+
+  if (!include || (Array.isArray(include) && include.length === 0) ||
+      (Array.isArray(objects) && objects.length === 0) ||
+      (isPlainObject(include) && Object.keys(include).length === 0)) {
+    // The objects are empty
+    return process.nextTick(function() {
+      cb && cb(null, objects);
+    });
+  }
+
+  include = normalizeInclude(include);
+
+  async.each(include, function(item, callback) {
+    processIncludeItem(objects, item, options, callback);
+  }, function(err) {
+    cb && cb(err, objects);
+  });
+
+  function processIncludeItem(objs, include, options, cb) {
+    var relations = self.relations;
+
+    var relationName;
+    var subInclude = null, scope = null;
+
+    if (isPlainObject(include)) {
+      relationName = Object.keys(include)[0];
+      if (include[relationName] instanceof IncludeScope) {
+        scope = include[relationName];
+        subInclude = scope.include();
+      } else {
+        subInclude = include[relationName];
+        //when include = {user:true}, it does not have subInclude
+        if (subInclude === true) {
+          subInclude = null;
+        }
+      }
+    }
+    else {
+      relationName = include;
+      subInclude = null;
+    }
+
+    var relation = relations[relationName];
+    if (!relation) {
+      cb(new Error('Relation "' + relationName + '" is not defined for '
+        + self.modelName + ' model'));
+      return;
+    }
+    var polymorphic = relation.polymorphic;
+    //if (polymorphic && !polymorphic.discriminator) {
+    //  cb(new Error('Relation "' + relationName + '" is polymorphic but ' +
+    //    'discriminator is not present'));
+    //  return;
+    //}
+    if (!relation.modelTo) {
+      if (!relation.polymorphic) {
+        cb(new Error('Relation.modelTo is not defined for relation' +
+          relationName + ' and is no polymorphic'));
+        return;
+      }
+    }
+
+    // Just skip if inclusion is disabled
+    if (relation.options.disableInclude) {
+      return cb();
+    }
+    //prepare filter and fields for making DB Call
+    var filter = (scope && scope.conditions()) || {};
+    if ((relation.multiple || relation.type === 'belongsTo') && scope) {
+      var includeScope = {};
+      // make sure not to miss any fields for sub includes
+      if (filter.fields && Array.isArray(subInclude) &&
+        relation.modelTo.relations) {
+        includeScope.fields = [];
+        subInclude.forEach(function (name) {
+          var rel = relation.modelTo.relations[name];
+          if (rel && rel.type === 'belongsTo') {
+            includeScope.fields.push(rel.keyFrom);
+          }
+        });
+      }
+      utils.mergeQuery(filter, includeScope, {fields: false});
+    }
+    //Let's add a placeholder where query
+    filter.where = filter.where || {};
+    //if fields are specified, make sure target foreign key is present
+    var fields = filter.fields;
+    if (Array.isArray(fields) && fields.indexOf(relation.keyTo) === -1) {
+      fields.push(relation.keyTo);
+    }
+    else if (isPlainObject(fields) && !fields[relation.keyTo]) {
+      fields[relation.keyTo] = true;
+    }
+
+    /**
+     * call relation specific include functions
+     */
+    if (relation.multiple) {
+      if (relation.modelThrough) {
+        //hasManyThrough needs separate handling
+        return includeHasManyThrough(cb);
+      }
+      //This will also include embedsMany with belongsTo.
+      //Might need to optimize db calls for this.
+      if (relation.type === 'embedsMany') {
+        //embedded docs are part of the objects, no need to make db call.
+        //proceed as implemented earlier.
+        return includeEmbeds(cb);
+      }
+      if (relation.type === 'referencesMany') {
+        return includeReferencesMany(cb);
+      }
+
+      //This handles exactly hasMany. Fast and straightforward. Without parallel, each and other boilerplate.
+      if(relation.type === 'hasMany' && relation.multiple && !subInclude){
+        return includeHasManySimple(cb);
+      }
+      //assuming all other relations with multiple=true as hasMany
+      return includeHasMany(cb);
+    }
+    else {
+      if (polymorphic) {
+        if (relation.type === 'hasOne') {
+          return includePolymorphicHasOne(cb);
+        }
+        return includePolymorphicBelongsTo(cb);
+      }
+      if (relation.type === 'embedsOne') {
+        return includeEmbeds(cb);
+      }
+      //hasOne or belongsTo
+      return includeOneToOne(cb);
+    }
+
+    /**
+     * Handle inclusion of HasManyThrough/HasAndBelongsToMany/Polymorphic
+     * HasManyThrough relations
+     * @param callback
+     */
+    function includeHasManyThrough(callback) {
+      var sourceIds = [];
+      //Map for Indexing objects by their id for faster retrieval
+      var objIdMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        // one-to-many: foreign key reference is modelTo -> modelFrom.
+        // use modelFrom.keyFrom in where filter later
+        var sourceId = obj[relation.keyFrom];
+        if (sourceId) {
+          sourceIds.push(sourceId);
+          objIdMap[sourceId.toString()] = obj;
+        }
+        // sourceId can be null. but cache empty data as result
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = [];
+      }
+      //default filters are not applicable on through model. should be applied
+      //on modelTo later in 2nd DB call.
+      var throughFilter = {
+        where: {}
+      };
+      throughFilter.where[relation.keyTo] = {
+        inq: uniq(sourceIds)
+      };
+      if (polymorphic) {
+        //handle polymorphic hasMany (reverse) in which case we need to filter
+        //by discriminator to filter other types
+        throughFilter.where[polymorphic.discriminator] =
+          relation.modelFrom.definition.name;
+      }
+      /**
+       * 1st DB Call of 2 step process. Get through model objects first
+       */
+      relation.modelThrough.find(throughFilter, options, throughFetchHandler);
+      /**
+       * Handle the results of Through model objects and fetch the modelTo items
+       * @param err
+       * @param {Array<Model>} throughObjs
+       * @returns {*}
+       */
+      function throughFetchHandler(err, throughObjs) {
+        if (err) {
+          return callback(err);
+        }
+        // start preparing for 2nd DB call.
+        var targetIds = [];
+        var targetObjsMap = {};
+        for (var i = 0; i < throughObjs.length; i++) {
+          var throughObj = throughObjs[i];
+          var targetId = throughObj[relation.keyThrough];
+          if (targetId) {
+            //save targetIds for 2nd DB Call
+            targetIds.push(targetId);
+            var sourceObj = objIdMap[throughObj[relation.keyTo]];
+            var targetIdStr = targetId.toString();
+            //Since targetId can be duplicates, multiple source objs are put
+            //into buckets.
+            var objList = targetObjsMap[targetIdStr] =
+              targetObjsMap[targetIdStr] || [];
+            objList.push(sourceObj);
+          }
+        }
+        //Polymorphic relation does not have idKey of modelTo. Find it manually
+        var modelToIdName = idName(relation.modelTo);
+        filter.where[modelToIdName] = {
+          inq: uniq(targetIds)
+        };
+
+        //make sure that the modelToIdName is included if fields are specified
+        if (Array.isArray(fields) && fields.indexOf(modelToIdName) === -1) {
+          fields.push(modelToIdName);
+        }
+        else if (isPlainObject(fields) && !fields[modelToIdName]) {
+          fields[modelToIdName] = true;
+        }
+
+        /**
+         * 2nd DB Call of 2 step process. Get modelTo (target) objects
+         */
+        relation.modelTo.find(filter, options, targetsFetchHandler);
+        function targetsFetchHandler(err, targets) {
+          if (err) {
+            return callback(err);
+          }
+          var tasks = [];
+          //simultaneously process subIncludes. Call it first as it is an async
+          //process.
+          if (subInclude && targets) {
+            tasks.push(function subIncludesTask(next) {
+              relation.modelTo.include(targets, subInclude, options, next);
+            });
+          }
+          //process & link each target with object
+          tasks.push(targetLinkingTask);
+          function targetLinkingTask(next) {
+            async.each(targets, linkManyToMany, next);
+            function linkManyToMany(target, next) {
+              var targetId = target[modelToIdName];
+              var objList = targetObjsMap[targetId.toString()];
+              async.each(objList, function (obj, next) {
+                if (!obj) return next();
+                obj.__cachedRelations[relationName].push(target);
+                processTargetObj(obj, next);
+              }, next);
+            }
+          }
+
+          execTasksWithInterLeave(tasks, callback);
+        }
+      }
+    }
+
+    /**
+     * Handle inclusion of ReferencesMany relation
+     * @param callback
+     */
+    function includeReferencesMany(callback) {
+      var modelToIdName = idName(relation.modelTo);
+      var allTargetIds = [];
+      //Map for Indexing objects by their id for faster retrieval
+      var targetObjsMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        // one-to-many: foreign key reference is modelTo -> modelFrom.
+        // use modelFrom.keyFrom in where filter later
+        var targetIds = obj[relation.keyFrom];
+        if (targetIds) {
+          if (typeof targetIds === 'string') {
+            // For relational DBs, the array is stored as stringified json
+            // Please note obj is a plain object at this point
+            targetIds = JSON.parse(targetIds);
+          }
+          //referencesMany has multiple targetIds per obj. We need to concat
+          // them into allTargetIds before DB Call
+          allTargetIds = allTargetIds.concat(targetIds);
+          for (var j = 0; j < targetIds.length; j++) {
+            var targetId = targetIds[j];
+            var targetIdStr = targetId.toString();
+            var objList = targetObjsMap[targetIdStr] =
+              targetObjsMap[targetIdStr] || [];
+            objList.push(obj);
+          }
+        }
+        // sourceId can be null. but cache empty data as result
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = [];
+      }
+      filter.where[relation.keyTo] = {
+        inq: uniq(allTargetIds)
+      };
+      relation.applyScope(null, filter);
+      /**
+       * Make the DB Call, fetch all target objects
+       */
+      relation.modelTo.find(filter, options, targetFetchHandler);
+      /**
+       * Handle the fetched target objects
+       * @param err
+       * @param {Array<Model>}targets
+       * @returns {*}
+       */
+      function targetFetchHandler(err, targets) {
+        if (err) {
+          return callback(err);
+        }
+        var tasks = [];
+        //simultaneously process subIncludes
+        if (subInclude && targets) {
+          tasks.push(function subIncludesTask(next) {
+            relation.modelTo.include(targets, subInclude, options, next);
+          });
+        }
+        targets = utils.sortObjectsByIds(modelToIdName, allTargetIds, targets);
+        //process each target object
+        tasks.push(targetLinkingTask);
+        function targetLinkingTask(next) {
+          async.each(targets, linkManyToMany, next);
+          function linkManyToMany(target, next) {
+            var objList = targetObjsMap[target[relation.keyTo].toString()];
+            async.each(objList, function (obj, next) {
+              if (!obj) return next();
+              obj.__cachedRelations[relationName].push(target);
+              processTargetObj(obj, next);
+            }, next);
+
+          }
+        }
+
+        execTasksWithInterLeave(tasks, callback);
+      }
+    }
+
+    /**
+     * Handle inclusion of HasMany relation
+     * @param callback
+     */
+    function includeHasManySimple(callback) {
+      //Map for Indexing objects by their id for faster retrieval
+      var objIdMap2 = includeUtils.buildOneToOneIdentityMapWithOrigKeys(objs, relation.keyFrom);
+
+      filter.where[relation.keyTo] = {
+        inq: uniq(objIdMap2.getKeys())
+      };
+
+      relation.applyScope(null, filter);
+      relation.modelTo.find(filter, options, targetFetchHandler);
+
+      function targetFetchHandler(err, targets) {
+        if(err) {
+          return callback(err);
+        }
+        var targetsIdMap = includeUtils.buildOneToManyIdentityMapWithOrigKeys(targets, relation.keyTo);
+        includeUtils.join(objIdMap2, targetsIdMap, function(obj1, valueToMergeIn){
+          defineCachedRelations(obj1);
+          obj1.__cachedRelations[relationName] = valueToMergeIn;
+          processTargetObj(obj1, function(){});
+        });
+        callback(err, objs);
+      }
+    }
+
+    /**
+     * Handle inclusion of HasMany relation
+     * @param callback
+     */
+    function includeHasMany(callback) {
+      var sourceIds = [];
+      //Map for Indexing objects by their id for faster retrieval
+      var objIdMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        // one-to-many: foreign key reference is modelTo -> modelFrom.
+        // use modelFrom.keyFrom in where filter later
+        var sourceId = obj[relation.keyFrom];
+        if (sourceId) {
+          sourceIds.push(sourceId);
+          objIdMap[sourceId.toString()] = obj;
+        }
+        // sourceId can be null. but cache empty data as result
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = [];
+      }
+      filter.where[relation.keyTo] = {
+        inq: uniq(sourceIds)
+      };
+      relation.applyScope(null, filter);
+      options.partitionBy = relation.keyTo;
+      relation.modelTo.find(filter, options, targetFetchHandler);
+      /**
+       * Process fetched related objects
+       * @param err
+       * @param {Array<Model>} targets
+       * @returns {*}
+       */
+      function targetFetchHandler(err, targets) {
+        if (err) {
+          return callback(err);
+        }
+        var tasks = [];
+        //simultaneously process subIncludes
+        if (subInclude && targets) {
+          tasks.push(function subIncludesTask(next) {
+            relation.modelTo.include(targets, subInclude, options, next);
+          });
+        }
+        //process each target object
+        tasks.push(targetLinkingTask);
+        function targetLinkingTask(next) {
+          if (targets.length === 0) {
+            return async.each(objs, function(obj, next) {
+              processTargetObj(obj, next);
+            }, next);
+          }
+
+          async.each(targets, linkManyToOne, next);
+          function linkManyToOne(target, next) {
+            //fix for bug in hasMany with referencesMany
+            var targetIds = [].concat(target[relation.keyTo]);
+            async.each(targetIds, function (targetId, next) {
+              var obj = objIdMap[targetId.toString()];
+              if (!obj) return next();
+              obj.__cachedRelations[relationName].push(target);
+              processTargetObj(obj, next);
+            }, function(err, processedTargets) {
+              if (err) {
+                return next(err);
+              }
+
+              var objsWithEmptyRelation = objs.filter(function(obj) {
+                return obj.__cachedRelations[relationName].length === 0;
+              });
+              async.each(objsWithEmptyRelation, function(obj, next) {
+                processTargetObj(obj, next);
+              }, function(err) {
+                next(err, processedTargets);
+              });
+            });
+          }
+        }
+
+        execTasksWithInterLeave(tasks, callback);
+      }
+    }
+
+    /**
+     * Handle Inclusion of Polymorphic BelongsTo relation
+     * @param callback
+     */
+    function includePolymorphicBelongsTo(callback) {
+      var targetIdsByType = {};
+      //Map for Indexing objects by their type and targetId for faster retrieval
+      var targetObjMapByType = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        var discriminator = polymorphic.discriminator;
+        var modelType = obj[discriminator];
+        if (modelType) {
+          targetIdsByType[modelType] = targetIdsByType[modelType] || [];
+          targetObjMapByType[modelType] = targetObjMapByType[modelType] || {};
+          var targetIds = targetIdsByType[modelType];
+          var targetObjsMap = targetObjMapByType[modelType];
+          var targetId = obj[relation.keyFrom];
+          if (targetId) {
+            targetIds.push(targetId);
+            var targetIdStr = targetId.toString();
+            targetObjsMap[targetIdStr] = targetObjsMap[targetIdStr] || [];
+            //Is belongsTo. Multiple objects can have the same
+            //targetId and therefore map value is an array
+            targetObjsMap[targetIdStr].push(obj);
+          }
+        }
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = null;
+      }
+      async.each(Object.keys(targetIdsByType), processPolymorphicType,
+        callback);
+      /**
+       * Process Polymorphic objects of each type (modelType)
+       * @param {String} modelType
+       * @param callback
+       */
+      function processPolymorphicType(modelType, callback) {
+        var typeFilter = {where: {}};
+        utils.mergeQuery(typeFilter, filter);
+        var targetIds = targetIdsByType[modelType];
+        typeFilter.where[relation.keyTo] = {
+          inq: uniq(targetIds)
+        };
+        var Model = lookupModel(relation.modelFrom.dataSource.modelBuilder.
+          models, modelType);
+        if (!Model) {
+          callback(new Error('Discriminator type "' + modelType +
+            ' specified but no model exists with such name'));
+          return;
+        }
+        relation.applyScope(null, typeFilter);
+        Model.find(typeFilter, options, targetFetchHandler);
+        /**
+         * Process fetched related objects
+         * @param err
+         * @param {Array<Model>} targets
+         * @returns {*}
+         */
+        function targetFetchHandler(err, targets) {
+          if (err) {
+            return callback(err);
+          }
+          var tasks = [];
+
+          //simultaneously process subIncludes
+          if (subInclude && targets) {
+            tasks.push(function subIncludesTask(next) {
+              Model.include(targets, subInclude, options, next);
+            });
+          }
+          //process each target object
+          tasks.push(targetLinkingTask);
+          function targetLinkingTask(next) {
+            var targetObjsMap = targetObjMapByType[modelType];
+            async.each(targets, linkOneToMany, next);
+            function linkOneToMany(target, next) {
+              var objList = targetObjsMap[target[relation.keyTo].toString()];
+              async.each(objList, function (obj, next) {
+                if (!obj) return next();
+                obj.__cachedRelations[relationName] = target;
+                processTargetObj(obj, next);
+              }, next);
+            }
+          }
+
+          execTasksWithInterLeave(tasks, callback);
+        }
+      }
+    }
+
+
+    /**
+     * Handle Inclusion of Polymorphic HasOne relation
+     * @param callback
+     */
+    function includePolymorphicHasOne(callback) {
+      var sourceIds = [];
+      //Map for Indexing objects by their id for faster retrieval
+      var objIdMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        // one-to-one: foreign key reference is modelTo -> modelFrom.
+        // use modelFrom.keyFrom in where filter later
+        var sourceId = obj[relation.keyFrom];
+        if (sourceId) {
+          sourceIds.push(sourceId);
+          objIdMap[sourceId.toString()] = obj;
+        }
+        // sourceId can be null. but cache empty data as result
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = null;
+      }
+      filter.where[relation.keyTo] = {
+        inq: uniq(sourceIds)
+      };
+      relation.applyScope(null, filter);
+      relation.modelTo.find(filter, options, targetFetchHandler);
+      /**
+       * Process fetched related objects
+       * @param err
+       * @param {Array<Model>} targets
+       * @returns {*}
+       */
+      function targetFetchHandler(err, targets) {
+        if (err) {
+          return callback(err);
+        }
+        var tasks = [];
+        //simultaneously process subIncludes
+        if (subInclude && targets) {
+          tasks.push(function subIncludesTask(next) {
+            relation.modelTo.include(targets, subInclude, options, next);
+          });
+        }
+        //process each target object
+        tasks.push(targetLinkingTask);
+        function targetLinkingTask(next) {
+          async.each(targets, linkOneToOne, next);
+          function linkOneToOne(target, next) {
+            var sourceId = target[relation.keyTo];
+            if (!sourceId) return next();
+            var obj = objIdMap[sourceId.toString()];
+            if (!obj) return next();
+            obj.__cachedRelations[relationName] = target;
+            processTargetObj(obj, next);
+          }
+        }
+
+        execTasksWithInterLeave(tasks, callback);
+      }
+    }
+
+    /**
+     * Handle Inclusion of BelongsTo/HasOne relation
+     * @param callback
+     */
+    function includeOneToOne(callback) {
+      var targetIds = [];
+      var objTargetIdMap = {};
+      for (var i = 0; i < objs.length; i++) {
+        var obj = objs[i];
+        if (relation.type === 'belongsTo') {
+          if (obj[relation.keyFrom] === null ||
+            obj[relation.keyFrom] === undefined) {
+            defineCachedRelations(obj);
+            obj.__cachedRelations[relationName] = null;
+            continue;
+          }
+        }
+        var targetId = obj[relation.keyFrom];
+        if (targetId) {
+          targetIds.push(targetId);
+          var targetIdStr = targetId.toString();
+          objTargetIdMap[targetIdStr] = objTargetIdMap[targetIdStr] || [];
+          objTargetIdMap[targetIdStr].push(obj);
+        }
+        defineCachedRelations(obj);
+        obj.__cachedRelations[relationName] = null;
+      }
+      filter.where[relation.keyTo] = {
+        inq: uniq(targetIds)
+      };
+      relation.applyScope(null, filter);
+      relation.modelTo.find(filter, options, targetFetchHandler);
+      /**
+       * Process fetched related objects
+       * @param err
+       * @param {Array<Model>} targets
+       * @returns {*}
+       */
+      function targetFetchHandler(err, targets) {
+        if (err) {
+          return callback(err);
+        }
+        var tasks = [];
+        //simultaneously process subIncludes
+        if (subInclude && targets) {
+          tasks.push(function subIncludesTask(next) {
+            relation.modelTo.include(targets, subInclude, options, next);
+          });
+        }
+        //process each target object
+        tasks.push(targetLinkingTask);
+        function targetLinkingTask(next) {
+          async.each(targets, linkOneToMany, next);
+          function linkOneToMany(target, next) {
+            var targetId = target[relation.keyTo];
+            var objList = objTargetIdMap[targetId.toString()];
+            async.each(objList, function (obj, next) {
+              if (!obj) return next();
+              obj.__cachedRelations[relationName] = target;
+              processTargetObj(obj, next);
+            }, next);
+          }
+        }
+
+        execTasksWithInterLeave(tasks, callback);
+      }
+    }
+
+
+    /**
+     * Handle Inclusion of EmbedsMany/EmbedsManyWithBelongsTo/EmbedsOne
+     * Relations. Since Embedded docs are part of parents, no need to make
+     * db calls. Let the related function be called for each object to fetch
+     * the results from cache.
+     *
+     * TODO: Optimize EmbedsManyWithBelongsTo relation DB Calls
+     * @param callback
+     */
+    function includeEmbeds(callback) {
+      async.each(objs, function (obj, next) {
+        processTargetObj(obj, next);
+      }, callback);
+    }
+
+    /**
+     * Process Each Model Object and make sure specified relations are included
+     * @param {Model} obj - Single Mode object for which inclusion is needed
+     * @param callback
+     * @returns {*}
+     */
+    function processTargetObj(obj, callback) {
+
+      var isInst = obj instanceof self;
+
+      // Calling the relation method on the instance
+      if (relation.type === 'belongsTo') {
+        // If the belongsTo relation doesn't have an owner
+        if (obj[relation.keyFrom] === null || obj[relation.keyFrom] === undefined) {
+          defineCachedRelations(obj);
+          // Set to null if the owner doesn't exist
+          obj.__cachedRelations[relationName] = null;
+          if (isInst) {
+            obj.__data[relationName] = null;
+          } else {
+            obj[relationName] = null;
+          }
+          return callback();
+        }
+      }
+      /**
+       * Sets the related objects as a property of Parent Object
+       * @param {Array<Model>|Model|null} result - Related Object/Objects
+       * @param cb
+       */
+      function setIncludeData(result, cb) {
+        if (isInst) {
+          if (Array.isArray(result) && !(result instanceof List)) {
+            result = new List(result, relation.modelTo);
+          }
+          obj.__data[relationName] = result;
+          obj.setStrict(false);
+        } else {
+          obj[relationName] = result;
+        }
+        cb(null, result);
+      }
+
+      //obj.__cachedRelations[relationName] can be null if no data was returned
+      if (obj.__cachedRelations &&
+        obj.__cachedRelations[relationName] !== undefined) {
+        return setIncludeData(obj.__cachedRelations[relationName],
+          callback);
+      }
+
+      var inst = (obj instanceof self) ? obj : new self(obj);
+
+      //If related objects are not cached by include Handlers, directly call
+      //related accessor function even though it is not very efficient
+      var related; // relation accessor function
+
+      if ((relation.multiple || relation.type === 'belongsTo') && scope) {
+        var includeScope = {};
+        var filter = scope.conditions();
+
+        // make sure not to miss any fields for sub includes
+        if (filter.fields && Array.isArray(subInclude) && relation.modelTo.relations) {
+          includeScope.fields = [];
+          subInclude.forEach(function(name) {
+            var rel = relation.modelTo.relations[name];
+            if (rel && rel.type === 'belongsTo') {
+              includeScope.fields.push(rel.keyFrom);
+            }
+          });
+        }
+
+        utils.mergeQuery(filter, includeScope, {fields: false});
+
+        related = inst[relationName].bind(inst, filter);
+      } else {
+        related = inst[relationName].bind(inst, undefined);
+      }
+
+      related(options, function (err, result) {
+        if (err) {
+          return callback(err);
+        } else {
+
+          defineCachedRelations(obj);
+          obj.__cachedRelations[relationName] = result;
+
+          return setIncludeData(result, callback);
+        }
+      });
+    }
+
+  }
+};
+
+
+}).call(this,require('_process'))
+},{"./include_utils":505,"./list":508,"./utils":519,"_process":279,"async":521}],505:[function(require,module,exports){
+arguments[4][193][0].apply(exports,arguments)
+},{"dup":193}],506:[function(require,module,exports){
+arguments[4][194][0].apply(exports,arguments)
+},{"dup":194}],507:[function(require,module,exports){
+arguments[4][195][0].apply(exports,arguments)
+},{"dup":195,"util":396}],508:[function(require,module,exports){
+arguments[4][196][0].apply(exports,arguments)
+},{"./types":518,"dup":196,"util":396}],509:[function(require,module,exports){
+arguments[4][197][0].apply(exports,arguments)
+},{"./model.js":512,"assert":22,"debug":419,"dup":197}],510:[function(require,module,exports){
+arguments[4][198][0].apply(exports,arguments)
+},{"./introspection":506,"./list.js":508,"./mixins":509,"./model-definition.js":511,"./model.js":512,"./types":518,"./utils":519,"assert":22,"depd":498,"dup":198,"events":111,"inflection":461,"util":396}],511:[function(require,module,exports){
+arguments[4][199][0].apply(exports,arguments)
+},{"./model":512,"./model-builder":510,"./types":518,"assert":22,"dup":199,"events":111,"traverse":666,"util":396}],512:[function(require,module,exports){
+arguments[4][200][0].apply(exports,arguments)
+},{"./hooks":503,"./jutil":507,"./list":508,"./observer":513,"./utils":519,"./validations":520,"_process":279,"async":521,"depd":498,"dup":200,"node-uuid":577,"util":396}],513:[function(require,module,exports){
+arguments[4][201][0].apply(exports,arguments)
+},{"./utils":519,"async":521,"dup":201}],514:[function(require,module,exports){
+arguments[4][202][0].apply(exports,arguments)
+},{"./connectors/memory":499,"./model.js":512,"./scope.js":516,"./utils":519,"./validations.js":520,"_process":279,"assert":22,"async":521,"debug":419,"dup":202,"inflection":461,"util":396}],515:[function(require,module,exports){
+arguments[4][203][0].apply(exports,arguments)
+},{"./relation-definition":514,"dup":203}],516:[function(require,module,exports){
+arguments[4][204][0].apply(exports,arguments)
+},{"./model.js":512,"./utils":519,"dup":204,"inflection":461}],517:[function(require,module,exports){
+arguments[4][205][0].apply(exports,arguments)
+},{"./jutil":507,"./observer":513,"./utils":519,"_process":279,"debug":419,"dup":205,"loopback-connector":491,"node-uuid":577}],518:[function(require,module,exports){
+arguments[4][206][0].apply(exports,arguments)
+},{"./geo":502,"buffer":58,"dup":206}],519:[function(require,module,exports){
+arguments[4][207][0].apply(exports,arguments)
+},{"_process":279,"assert":22,"dup":207,"qs":522,"traverse":666,"url":392}],520:[function(require,module,exports){
+arguments[4][208][0].apply(exports,arguments)
+},{"_process":279,"dup":208,"util":396}],521:[function(require,module,exports){
+arguments[4][209][0].apply(exports,arguments)
+},{"_process":279,"dup":209}],522:[function(require,module,exports){
+arguments[4][210][0].apply(exports,arguments)
+},{"./lib/":523,"dup":210}],523:[function(require,module,exports){
+arguments[4][211][0].apply(exports,arguments)
+},{"./parse":524,"./stringify":525,"dup":211}],524:[function(require,module,exports){
+arguments[4][212][0].apply(exports,arguments)
+},{"./utils":526,"dup":212}],525:[function(require,module,exports){
+arguments[4][213][0].apply(exports,arguments)
+},{"./utils":526,"dup":213}],526:[function(require,module,exports){
+arguments[4][214][0].apply(exports,arguments)
+},{"dup":214}],527:[function(require,module,exports){
+module.exports={
+  "_args": [
+    [
+      "loopback-datasource-juggler@^2.39.0",
+      "C:\\Users\\woste\\Documents\\code\\GitHub\\loopback-full-stack-tenancy"
+    ]
+  ],
+  "_from": "loopback-datasource-juggler@>=2.39.0 <3.0.0",
+  "_id": "loopback-datasource-juggler@2.44.0",
+  "_inCache": true,
+  "_installable": true,
+  "_location": "/loopback-datasource-juggler",
+  "_nodeVersion": "0.10.40",
+  "_npmUser": {
+    "email": "enjoyjava@gmail.com",
+    "name": "rfeng"
+  },
+  "_npmVersion": "3.5.1",
+  "_phantomChildren": {},
+  "_requested": {
+    "name": "loopback-datasource-juggler",
+    "raw": "loopback-datasource-juggler@^2.39.0",
+    "rawSpec": "^2.39.0",
+    "scope": null,
+    "spec": ">=2.39.0 <3.0.0",
+    "type": "range"
+  },
+  "_requiredBy": [
+    "/",
+    "/loopback-connector-remote"
+  ],
+  "_resolved": "https://registry.npmjs.org/loopback-datasource-juggler/-/loopback-datasource-juggler-2.44.0.tgz",
+  "_shasum": "045b312f364b6f7ec2d6c5452acd6b8350b13a24",
+  "_shrinkwrap": null,
+  "_spec": "loopback-datasource-juggler@^2.39.0",
+  "_where": "C:\\Users\\woste\\Documents\\code\\GitHub\\loopback-full-stack-tenancy",
+  "browser": {
+    "depd": "./lib/browser.depd.js"
+  },
+  "bugs": {
+    "url": "https://github.com/strongloop/loopback-datasource-juggler/issues"
+  },
+  "dependencies": {
+    "async": "~1.0.0",
+    "debug": "^2.1.1",
+    "depd": "^1.0.0",
+    "inflection": "^1.6.0",
+    "loopback-connector": "^2.1.0",
+    "node-uuid": "^1.4.2",
+    "qs": "^3.1.0",
+    "traverse": "^0.6.6"
+  },
+  "description": "LoopBack DataSoure Juggler",
+  "devDependencies": {
+    "bluebird": "^2.9.9",
+    "mocha": "^2.1.0",
+    "should": "^5.0.0"
+  },
+  "directories": {},
+  "dist": {
+    "shasum": "045b312f364b6f7ec2d6c5452acd6b8350b13a24",
+    "tarball": "http://registry.npmjs.org/loopback-datasource-juggler/-/loopback-datasource-juggler-2.44.0.tgz"
+  },
+  "engines": [
+    "node >= 0.6"
+  ],
+  "gitHead": "1e9bbd27873077ef374ea5487121a70173757364",
+  "homepage": "https://github.com/strongloop/loopback-datasource-juggler#readme",
+  "keywords": [
+    "Connector",
+    "DataSource",
+    "Database",
+    "Juggler",
+    "LoopBack",
+    "ORM",
+    "StrongLoop"
+  ],
+  "license": "MIT",
+  "main": "index.js",
+  "maintainers": [
+    {
+      "name": "rfeng",
+      "email": "enjoyjava@gmail.com"
+    },
+    {
+      "name": "ritch",
+      "email": "skawful@gmail.com"
+    },
+    {
+      "name": "schoonology",
+      "email": "michael.r.schoonmaker@gmail.com"
+    },
+    {
+      "name": "strongloop",
+      "email": "callback@strongloop.com"
+    },
+    {
+      "name": "bajtos",
+      "email": "miro.bajtos@gmail.com"
+    }
+  ],
+  "name": "loopback-datasource-juggler",
+  "optionalDependencies": {},
+  "readme": "ERROR: No README data found!",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strongloop/loopback-datasource-juggler.git"
+  },
+  "scripts": {
+    "clean": "make clean",
+    "help": "make help",
+    "refresh": "make refresh",
+    "test": "make test"
+  },
+  "version": "2.44.0"
+}
+
+},{}],528:[function(require,module,exports){
+arguments[4][216][0].apply(exports,arguments)
+},{"dup":216}],529:[function(require,module,exports){
+arguments[4][217][0].apply(exports,arguments)
+},{"dup":217}],530:[function(require,module,exports){
+(function (process,Buffer){
+/*!
+ * Module Dependencies.
+ */
+
+var loopback = require('../../lib/loopback');
+var assert = require('assert');
+var uid = require('uid2');
+var DEFAULT_TOKEN_LEN = 64;
+
+/**
+ * Token based authentication and access control.
+ *
+ * **Default ACLs**
+ *
+ *  - DENY EVERYONE `*`
+ *  - ALLOW EVERYONE create
+ *
+ * @property {String} id Generated token ID.
+ * @property {Number} ttl Time to live in seconds, 2 weeks by default.
+ * @property {Date} created When the token was created.
+ * @property {Object} settings Extends the `Model.settings` object.
+ * @property {Number} settings.accessTokenIdLength Length of the base64-encoded string access token. Default value is 64.
+ * Increase the length for a more secure access token.
+ *
+ * @class AccessToken
+ * @inherits {PersistedModel}
+ */
+
+module.exports = function(AccessToken) {
+
+  // Workaround for https://github.com/strongloop/loopback/issues/292
+  AccessToken.definition.rawProperties.created.default =
+  AccessToken.definition.properties.created.default = function() {
+    return new Date();
+  };
+
+  /**
+   * Anonymous Token
+   *
+   * ```js
+   * assert(AccessToken.ANONYMOUS.id === '$anonymous');
+   * ```
+   */
+
+  AccessToken.ANONYMOUS = new AccessToken({id: '$anonymous'});
+
+  /**
+   * Create a cryptographically random access token id.
+   *
+   * @callback {Function} callback
+   * @param {Error} err
+   * @param {String} token
+   */
+
+  AccessToken.createAccessTokenId = function(fn) {
+    uid(this.settings.accessTokenIdLength || DEFAULT_TOKEN_LEN, function(err, guid) {
+      if (err) {
+        fn(err);
+      } else {
+        fn(null, guid);
+      }
+    });
+  };
+
+  /*!
+   * Hook to create accessToken id.
+   */
+  AccessToken.observe('before save', function(ctx, next) {
+    if (!ctx.instance || ctx.instance.id) {
+      // We are running a partial update or the instance already has an id
+      return next();
+    }
+
+    AccessToken.createAccessTokenId(function(err, id) {
+      if (err) return next(err);
+      ctx.instance.id = id;
+      next();
+    });
+  });
+
+  /**
+   * Find a token for the given `ServerRequest`.
+   *
+   * @param {ServerRequest} req
+   * @param {Object} [options] Options for finding the token
+   * @callback {Function} callback
+   * @param {Error} err
+   * @param {AccessToken} token
+   */
+
+  AccessToken.findForRequest = function(req, options, cb) {
+    if (cb === undefined && typeof options === 'function') {
+      cb = options;
+      options = {};
+    }
+
+    var id = tokenIdForRequest(req, options);
+
+    if (id) {
+      this.findById(id, function(err, token) {
+        if (err) {
+          cb(err);
+        } else if (token) {
+          token.validate(function(err, isValid) {
+            if (err) {
+              cb(err);
+            } else if (isValid) {
+              cb(null, token);
+            } else {
+              var e = new Error('Invalid Access Token');
+              e.status = e.statusCode = 401;
+              e.code = 'INVALID_TOKEN';
+              cb(e);
+            }
+          });
+        } else {
+          cb();
+        }
+      });
+    } else {
+      process.nextTick(function() {
+        cb();
+      });
+    }
+  };
+
+  /**
+   * Validate the token.
+   *
+   * @callback {Function} callback
+   * @param {Error} err
+   * @param {Boolean} isValid
+   */
+
+  AccessToken.prototype.validate = function(cb) {
+    try {
+      assert(
+          this.created && typeof this.created.getTime === 'function',
+        'token.created must be a valid Date'
+      );
+      assert(this.ttl !== 0, 'token.ttl must be not be 0');
+      assert(this.ttl, 'token.ttl must exist');
+      assert(this.ttl >= -1, 'token.ttl must be >= -1');
+
+      var now = Date.now();
+      var created = this.created.getTime();
+      var elapsedSeconds = (now - created) / 1000;
+      var secondsToLive = this.ttl;
+      var isValid = elapsedSeconds < secondsToLive;
+
+      if (isValid) {
+        cb(null, isValid);
+      } else {
+        this.destroy(function(err) {
+          cb(err, isValid);
+        });
+      }
+    } catch (e) {
+      cb(e);
+    }
+  };
+
+  function tokenIdForRequest(req, options) {
+    var params = options.params || [];
+    var headers = options.headers || [];
+    var cookies = options.cookies || [];
+    var i = 0;
+    var length;
+    var id;
+
+    // https://github.com/strongloop/loopback/issues/1326
+    if (options.searchDefaultTokenKeys !== false) {
+      params = params.concat(['access_token']);
+      headers = headers.concat(['X-Access-Token', 'authorization']);
+      cookies = cookies.concat(['access_token', 'authorization']);
+    }
+
+    for (length = params.length; i < length; i++) {
+      var param = params[i];
+      // replacement for deprecated req.param()
+      id = req.params && req.params[param] !== undefined ? req.params[param] :
+        req.body && req.body[param] !== undefined ? req.body[param] :
+        req.query && req.query[param] !== undefined ? req.query[param] :
+        undefined;
+
+      if (typeof id === 'string') {
+        return id;
+      }
+    }
+
+    for (i = 0, length = headers.length; i < length; i++) {
+      id = req.header(headers[i]);
+
+      if (typeof id === 'string') {
+        // Add support for oAuth 2.0 bearer token
+        // http://tools.ietf.org/html/rfc6750
+        if (id.indexOf('Bearer ') === 0) {
+          id = id.substring(7);
+          // Decode from base64
+          var buf = new Buffer(id, 'base64');
+          id = buf.toString('utf8');
+        } else if (/^Basic /i.test(id)) {
+          id = id.substring(6);
+          id = (new Buffer(id, 'base64')).toString('utf8');
+          // The spec says the string is user:pass, so if we see both parts
+          // we will assume the longer of the two is the token, so we will
+          // extract "a2b2c3" from:
+          //   "a2b2c3"
+          //   "a2b2c3:"   (curl http://a2b2c3@localhost:3000/)
+          //   "token:a2b2c3" (curl http://token:a2b2c3@localhost:3000/)
+          //   ":a2b2c3"
+          var parts = /^([^:]*):(.*)$/.exec(id);
+          if (parts) {
+            id = parts[2].length > parts[1].length ? parts[2] : parts[1];
+          }
+        }
+        return id;
+      }
+    }
+
+    if (req.signedCookies) {
+      for (i = 0, length = cookies.length; i < length; i++) {
+        id = req.signedCookies[cookies[i]];
+
+        if (typeof id === 'string') {
+          return id;
+        }
+      }
+    }
+    return null;
+  }
+};
+
+}).call(this,require('_process'),require("buffer").Buffer)
+},{"../../lib/loopback":558,"_process":279,"assert":22,"buffer":58,"uid2":669}],531:[function(require,module,exports){
+arguments[4][218][0].apply(exports,arguments)
+},{"dup":218}],532:[function(require,module,exports){
+(function (process){
+/*!
+ Schema ACL options
+
+ Object level permissions, for example, an album owned by a user
+
+ Factors to be authorized against:
+
+ * model name: Album
+ * model instance properties: userId of the album, friends, shared
+ * methods
+ * app and/or user ids/roles
+ ** loggedIn
+ ** roles
+ ** userId
+ ** appId
+ ** none
+ ** everyone
+ ** relations: owner/friend/granted
+
+ Class level permissions, for example, Album
+ * model name: Album
+ * methods
+
+ URL/Route level permissions
+ * url pattern
+ * application id
+ * ip addresses
+ * http headers
+
+ Map to oAuth 2.0 scopes
+
+ */
+
+var loopback = require('../../lib/loopback');
+var async = require('async');
+var assert = require('assert');
+var debug = require('debug')('loopback:security:acl');
+
+var ctx = require('../../lib/access-context');
+var AccessContext = ctx.AccessContext;
+var Principal = ctx.Principal;
+var AccessRequest = ctx.AccessRequest;
+
+var Role = loopback.Role;
+assert(Role, 'Role model must be defined before ACL model');
+
+/**
+ * A Model for access control meta data.
+ *
+ * System grants permissions to principals (users/applications, can be grouped
+ * into roles).
+ *
+ * Protected resource: the model data and operations
+ * (model/property/method/relation/…)
+ *
+ * For a given principal, such as client application and/or user, is it allowed
+ * to access (read/write/execute)
+ * the protected resource?
+ *
+ * @header ACL
+ * @property {String} model Name of the model.
+ * @property {String} property Name of the property, method, scope, or relation.
+ * @property {String} accessType Type of access being granted: one of READ, WRITE, or EXECUTE.
+ * @property {String} permission Type of permission granted. One of:
+ *
+ *  - ALARM: Generate an alarm, in a system-dependent way, the access specified in the permissions component of the ACL entry.
+ *  - ALLOW: Explicitly grants access to the resource.
+ *  - AUDIT: Log, in a system-dependent way, the access specified in the permissions component of the ACL entry.
+ *  - DENY: Explicitly denies access to the resource.
+ * @property {String} principalType Type of the principal; one of: Application, Use, Role.
+ * @property {String} principalId ID of the principal - such as appId, userId or roleId.
+ * @property {Object} settings Extends the `Model.settings` object.
+ * @property {String} settings.defaultPermission Default permission setting: ALLOW, DENY, ALARM, or AUDIT. Default is ALLOW.
+ * Set to DENY to prohibit all API access by default.
+ *
+ * @class ACL
+ * @inherits PersistedModel
+ */
+
+module.exports = function(ACL) {
+
+  ACL.ALL = AccessContext.ALL;
+
+  ACL.DEFAULT = AccessContext.DEFAULT; // Not specified
+  ACL.ALLOW = AccessContext.ALLOW; // Allow
+  ACL.ALARM = AccessContext.ALARM; // Warn - send an alarm
+  ACL.AUDIT = AccessContext.AUDIT; // Audit - record the access
+  ACL.DENY = AccessContext.DENY; // Deny
+
+  ACL.READ = AccessContext.READ; // Read operation
+  ACL.REPLICATE = AccessContext.REPLICATE; // Replicate (pull) changes
+  ACL.WRITE = AccessContext.WRITE; // Write operation
+  ACL.EXECUTE = AccessContext.EXECUTE; // Execute operation
+
+  ACL.USER = Principal.USER;
+  ACL.APP = ACL.APPLICATION = Principal.APPLICATION;
+  ACL.ROLE = Principal.ROLE;
+  ACL.SCOPE = Principal.SCOPE;
+
+  /**
+   * Calculate the matching score for the given rule and request
+   * @param {ACL} rule The ACL entry
+   * @param {AccessRequest} req The request
+   * @returns {Number}
+   */
+  ACL.getMatchingScore = function getMatchingScore(rule, req) {
+    var props = ['model', 'property', 'accessType'];
+    var score = 0;
+
+    for (var i = 0; i < props.length; i++) {
+      // Shift the score by 4 for each of the properties as the weight
+      score = score * 4;
+      var ruleValue = rule[props[i]] || ACL.ALL;
+      var requestedValue = req[props[i]] || ACL.ALL;
+      var isMatchingMethodName = props[i] === 'property' && req.methodNames.indexOf(ruleValue) !== -1;
+
+      var isMatchingAccessType = ruleValue === requestedValue;
+      if (props[i] === 'accessType' && !isMatchingAccessType) {
+        switch (ruleValue) {
+          case ACL.EXECUTE:
+            // EXECUTE should match READ, REPLICATE and WRITE
+            isMatchingAccessType = true;
+            break;
+          case ACL.WRITE:
+            // WRITE should match REPLICATE too
+            isMatchingAccessType = requestedValue === ACL.REPLICATE;
+            break;
+        }
+      }
+
+      if (isMatchingMethodName || isMatchingAccessType) {
+        // Exact match
+        score += 3;
+      } else if (ruleValue === ACL.ALL) {
+        // Wildcard match
+        score += 2;
+      } else if (requestedValue === ACL.ALL) {
+        score += 1;
+      } else {
+        // Doesn't match at all
+        return -1;
+      }
+    }
+
+    // Weigh against the principal type into 4 levels
+    // - user level (explicitly allow/deny a given user)
+    // - app level (explicitly allow/deny a given app)
+    // - role level (role based authorization)
+    // - other
+    // user > app > role > ...
+    score = score * 4;
+    switch (rule.principalType) {
+      case ACL.USER:
+        score += 4;
+        break;
+      case ACL.APP:
+        score += 3;
+        break;
+      case ACL.ROLE:
+        score += 2;
+        break;
+      default:
+        score += 1;
+    }
+
+    // Weigh against the roles
+    // everyone < authenticated/unauthenticated < related < owner < ...
+    score = score * 8;
+    if (rule.principalType === ACL.ROLE) {
+      switch (rule.principalId) {
+        case Role.OWNER:
+          score += 4;
+          break;
+        case Role.RELATED:
+          score += 3;
+          break;
+        case Role.AUTHENTICATED:
+        case Role.UNAUTHENTICATED:
+          score += 2;
+          break;
+        case Role.EVERYONE:
+          score += 1;
+          break;
+        default:
+          score += 5;
+      }
+    }
+    score = score * 4;
+    score += AccessContext.permissionOrder[rule.permission || ACL.ALLOW] - 1;
+    return score;
+  };
+
+  /**
+   * Get matching score for the given `AccessRequest`.
+   * @param {AccessRequest} req The request
+   * @returns {Number} score
+   */
+
+  ACL.prototype.score = function(req) {
+    return this.constructor.getMatchingScore(this, req);
+  };
+
+  /*!
+   * Resolve permission from the ACLs
+   * @param {Object[]) acls The list of ACLs
+   * @param {Object} req The request
+   * @returns {AccessRequest} result The effective ACL
+   */
+  ACL.resolvePermission = function resolvePermission(acls, req) {
+    if (!(req instanceof AccessRequest)) {
+      req = new AccessRequest(req);
+    }
+    // Sort by the matching score in descending order
+    acls = acls.sort(function(rule1, rule2) {
+      return ACL.getMatchingScore(rule2, req) - ACL.getMatchingScore(rule1, req);
+    });
+    var permission = ACL.DEFAULT;
+    var score = 0;
+
+    for (var i = 0; i < acls.length; i++) {
+      var candidate = acls[i];
+      score = ACL.getMatchingScore(candidate, req);
+      if (score < 0) {
+        // the highest scored ACL did not match
+        break;
+      }
+      if (!req.isWildcard()) {
+        // We should stop from the first match for non-wildcard
+        permission = candidate.permission;
+        break;
+      } else {
+        if (req.exactlyMatches(candidate)) {
+          permission = candidate.permission;
+          break;
+        }
+        // For wildcard match, find the strongest permission
+        var candidateOrder = AccessContext.permissionOrder[candidate.permission];
+        var permissionOrder = AccessContext.permissionOrder[permission];
+        if (candidateOrder > permissionOrder) {
+          permission = candidate.permission;
+        }
+      }
+    }
+
+    if (debug.enabled) {
+      debug('The following ACLs were searched: ');
+      acls.forEach(function(acl) {
+        acl.debug();
+        debug('with score:', acl.score(req));
+      });
+    }
+
+    var res = new AccessRequest(req.model, req.property, req.accessType,
+        permission || ACL.DEFAULT);
+    return res;
+  };
+
+  /*!
+   * Get the static ACLs from the model definition
+   * @param {String} model The model name
+   * @param {String} property The property/method/relation name
+   *
+   * @return {Object[]} An array of ACLs
+   */
+  ACL.getStaticACLs = function getStaticACLs(model, property) {
+    var modelClass = loopback.findModel(model);
+    var staticACLs = [];
+    if (modelClass && modelClass.settings.acls) {
+      modelClass.settings.acls.forEach(function(acl) {
+        var prop = acl.property;
+        // We support static ACL property with array of string values.
+        if (Array.isArray(prop) && prop.indexOf(property) >= 0)
+          prop = property;
+        if (!prop || prop === ACL.ALL || property === prop) {
+          staticACLs.push(new ACL({
+            model: model,
+            property: prop || ACL.ALL,
+            principalType: acl.principalType,
+            principalId: acl.principalId, // TODO: Should it be a name?
+            accessType: acl.accessType || ACL.ALL,
+            permission: acl.permission
+          }));
+        }
+      });
+    }
+    var prop = modelClass && (
+      // regular property
+      modelClass.definition.properties[property] ||
+      // relation/scope
+      (modelClass._scopeMeta && modelClass._scopeMeta[property]) ||
+      // static method
+      modelClass[property] ||
+      // prototype method
+      modelClass.prototype[property]);
+    if (prop && prop.acls) {
+      prop.acls.forEach(function(acl) {
+        staticACLs.push(new ACL({
+          model: modelClass.modelName,
+          property: property,
+          principalType: acl.principalType,
+          principalId: acl.principalId,
+          accessType: acl.accessType,
+          permission: acl.permission
+        }));
+      });
+    }
+    return staticACLs;
+  };
+
+  /**
+   * Check if the given principal is allowed to access the model/property
+   * @param {String} principalType The principal type.
+   * @param {String} principalId The principal ID.
+   * @param {String} model The model name.
+   * @param {String} property The property/method/relation name.
+   * @param {String} accessType The access type.
+   * @callback {Function} callback Callback function.
+   * @param {String|Error} err The error object
+   * @param {AccessRequest} result The access permission
+   */
+  ACL.checkPermission = function checkPermission(principalType, principalId,
+                                                 model, property, accessType,
+                                                 callback) {
+    if (principalId !== null && principalId !== undefined && (typeof principalId !== 'string')) {
+      principalId = principalId.toString();
+    }
+    property = property || ACL.ALL;
+    var propertyQuery = (property === ACL.ALL) ? undefined : {inq: [property, ACL.ALL]};
+    accessType = accessType || ACL.ALL;
+    var accessTypeQuery = (accessType === ACL.ALL) ? undefined : {inq: [accessType, ACL.ALL, ACL.EXECUTE]};
+
+    var req = new AccessRequest(model, property, accessType);
+
+    var acls = this.getStaticACLs(model, property);
+
+    var resolved = this.resolvePermission(acls, req);
+
+    if (resolved && resolved.permission === ACL.DENY) {
+      debug('Permission denied by statically resolved permission');
+      debug(' Resolved Permission: %j', resolved);
+      process.nextTick(function() {
+        if (callback) callback(null, resolved);
+      });
+      return;
+    }
+
+    var self = this;
+    this.find({where: {principalType: principalType, principalId: principalId,
+        model: model, property: propertyQuery, accessType: accessTypeQuery}},
+      function(err, dynACLs) {
+        if (err) {
+          if (callback) callback(err);
+          return;
+        }
+        acls = acls.concat(dynACLs);
+        resolved = self.resolvePermission(acls, req);
+        if (resolved && resolved.permission === ACL.DEFAULT) {
+          var modelClass = loopback.findModel(model);
+          resolved.permission = (modelClass && modelClass.settings.defaultPermission) || ACL.ALLOW;
+        }
+        if (callback) callback(null, resolved);
+      });
+  };
+
+  ACL.prototype.debug = function() {
+    if (debug.enabled) {
+      debug('---ACL---');
+      debug('model %s', this.model);
+      debug('property %s', this.property);
+      debug('principalType %s', this.principalType);
+      debug('principalId %s', this.principalId);
+      debug('accessType %s', this.accessType);
+      debug('permission %s', this.permission);
+    }
+  };
+
+  /**
+   * Check if the request has the permission to access.
+   * @options {Object} context See below.
+   * @property {Object[]} principals An array of principals.
+   * @property {String|Model} model The model name or model class.
+   * @property {*} id The model instance ID.
+   * @property {String} property The property/method/relation name.
+   * @property {String} accessType The access type:
+   *   READ, REPLICATE, WRITE, or EXECUTE.
+   * @param {Function} callback Callback function
+   */
+
+  ACL.checkAccessForContext = function(context, callback) {
+    var registry = this.registry;
+
+    if (!(context instanceof AccessContext)) {
+      context = new AccessContext(context);
+    }
+
+    var model = context.model;
+    var property = context.property;
+    var accessType = context.accessType;
+    var modelName = context.modelName;
+
+    var methodNames = context.methodNames;
+    var propertyQuery = (property === ACL.ALL) ? undefined : {inq: methodNames.concat([ACL.ALL])};
+
+    var accessTypeQuery = (accessType === ACL.ALL) ?
+      undefined :
+      (accessType === ACL.REPLICATE) ?
+        {inq: [ACL.REPLICATE, ACL.WRITE, ACL.ALL]} :
+        {inq: [accessType, ACL.ALL]};
+
+    var req = new AccessRequest(modelName, property, accessType, ACL.DEFAULT, methodNames);
+
+    var effectiveACLs = [];
+    var staticACLs = this.getStaticACLs(model.modelName, property);
+
+    var self = this;
+    var roleModel = registry.getModelByType(Role);
+    this.find({where: {model: model.modelName, property: propertyQuery,
+      accessType: accessTypeQuery}}, function(err, acls) {
+      if (err) {
+        if (callback) callback(err);
+        return;
+      }
+      var inRoleTasks = [];
+
+      acls = acls.concat(staticACLs);
+
+      acls.forEach(function(acl) {
+        // Check exact matches
+        for (var i = 0; i < context.principals.length; i++) {
+          var p = context.principals[i];
+          var typeMatch = p.type === acl.principalType;
+          var idMatch = String(p.id) === String(acl.principalId);
+          if (typeMatch && idMatch) {
+            effectiveACLs.push(acl);
+            return;
+          }
+        }
+
+        // Check role matches
+        if (acl.principalType === ACL.ROLE) {
+          inRoleTasks.push(function(done) {
+            roleModel.isInRole(acl.principalId, context,
+              function(err, inRole) {
+                if (!err && inRole) {
+                  effectiveACLs.push(acl);
+                }
+                done(err, acl);
+              });
+          });
+        }
+      });
+
+      async.parallel(inRoleTasks, function(err, results) {
+        if (err) {
+          if (callback) callback(err, null);
+          return;
+        }
+
+        var resolved = self.resolvePermission(effectiveACLs, req);
+        if (resolved && resolved.permission === ACL.DEFAULT) {
+          resolved.permission = (model && model.settings.defaultPermission) || ACL.ALLOW;
+        }
+        debug('---Resolved---');
+        resolved.debug();
+        if (callback) callback(null, resolved);
+      });
+    });
+  };
+
+  /**
+   * Check if the given access token can invoke the method
+   * @param {AccessToken} token The access token
+   * @param {String} model The model name
+   * @param {*} modelId The model id
+   * @param {String} method The method name
+   * @callback {Function} callback Callback function
+   * @param {String|Error} err The error object
+   * @param {Boolean} allowed is the request allowed
+   */
+  ACL.checkAccessForToken = function(token, model, modelId, method, callback) {
+    assert(token, 'Access token is required');
+
+    var context = new AccessContext({
+      accessToken: token,
+      model: model,
+      property: method,
+      method: method,
+      modelId: modelId
+    });
+
+    this.checkAccessForContext(context, function(err, access) {
+      if (err) {
+        if (callback) callback(err);
+        return;
+      }
+      if (callback) callback(null, access.permission !== ACL.DENY);
+    });
+  };
+
+  ACL.resolveRelatedModels = function() {
+    if (!this.roleModel) {
+      var reg = this.registry;
+      this.roleModel = reg.getModelByType(loopback.Role);
+      this.roleMappingModel = reg.getModelByType(loopback.RoleMapping);
+      this.userModel = reg.getModelByType(loopback.User);
+      this.applicationModel = reg.getModelByType(loopback.Application);
+    }
+  };
+
+  /**
+   * Resolve a principal by type/id
+   * @param {String} type Principal type - ROLE/APP/USER
+   * @param {String|Number} id Principal id or name
+   * @param {Function} cb Callback function
+   */
+  ACL.resolvePrincipal = function(type, id, cb) {
+    type = type || ACL.ROLE;
+    this.resolveRelatedModels();
+    switch (type) {
+      case ACL.ROLE:
+        this.roleModel.findOne({where: {or: [{name: id}, {id: id}]}}, cb);
+        break;
+      case ACL.USER:
+        this.userModel.findOne(
+          {where: {or: [{username: id}, {email: id}, {id: id}]}}, cb);
+        break;
+      case ACL.APP:
+        this.applicationModel.findOne(
+          {where: {or: [{name: id}, {email: id}, {id: id}]}}, cb);
+        break;
+      default:
+        process.nextTick(function() {
+          var err = new Error('Invalid principal type: ' + type);
+          err.statusCode = 400;
+          cb(err);
+        });
+    }
+  };
+
+  /**
+   * Check if the given principal is mapped to the role
+   * @param {String} principalType Principal type
+   * @param {String|*} principalId Principal id/name
+   * @param {String|*} role Role id/name
+   * @param {Function} cb Callback function
+   */
+  ACL.isMappedToRole = function(principalType, principalId, role, cb) {
+    var self = this;
+    this.resolvePrincipal(principalType, principalId,
+      function(err, principal) {
+        if (err) return cb(err);
+        if (principal != null) {
+          principalId = principal.id;
+        }
+        principalType = principalType || 'ROLE';
+        self.resolvePrincipal('ROLE', role, function(err, role) {
+          if (err || !role) return cb(err, role);
+          self.roleMappingModel.findOne({
+            where: {
+              roleId: role.id,
+              principalType: principalType,
+              principalId: String(principalId)
+            }
+          }, function(err, result) {
+            if (err) return cb(err);
+            return cb(null, !!result);
+          });
+        });
+      });
+  };
+};
+
+}).call(this,require('_process'))
+},{"../../lib/access-context":550,"../../lib/loopback":558,"_process":279,"assert":22,"async":411,"debug":419}],533:[function(require,module,exports){
+arguments[4][219][0].apply(exports,arguments)
+},{"dup":219}],534:[function(require,module,exports){
+arguments[4][220][0].apply(exports,arguments)
+},{"../../lib/utils":563,"assert":22,"crypto":72,"dup":220}],535:[function(require,module,exports){
+arguments[4][221][0].apply(exports,arguments)
+},{"dup":221}],536:[function(require,module,exports){
+arguments[4][222][0].apply(exports,arguments)
+},{"../../lib/loopback":558,"assert":22,"async":411,"canonical-json":415,"crypto":72,"debug":419,"depd":498,"dup":222}],537:[function(require,module,exports){
+arguments[4][223][0].apply(exports,arguments)
+},{"dup":223}],538:[function(require,module,exports){
+arguments[4][224][0].apply(exports,arguments)
+},{"assert":22,"dup":224}],539:[function(require,module,exports){
+arguments[4][225][0].apply(exports,arguments)
+},{"dup":225}],540:[function(require,module,exports){
+arguments[4][226][0].apply(exports,arguments)
+},{"dup":226}],541:[function(require,module,exports){
+arguments[4][227][0].apply(exports,arguments)
+},{"dup":227}],542:[function(require,module,exports){
+(function (process){
+var loopback = require('../../lib/loopback');
+
+/**
+ * The `RoleMapping` model extends from the built in `loopback.Model` type.
+ *
+ * @property {String} id Generated ID.
+ * @property {String} name Name of the role.
+ * @property {String} Description Text description.
+ *
+ * @class RoleMapping
+ * @inherits {PersistedModel}
+ */
+
+module.exports = function(RoleMapping) {
+  // Principal types
+  RoleMapping.USER = 'USER';
+  RoleMapping.APP = RoleMapping.APPLICATION = 'APP';
+  RoleMapping.ROLE = 'ROLE';
+
+  RoleMapping.resolveRelatedModels = function() {
+    if (!this.userModel) {
+      var reg = this.registry;
+      this.roleModel = reg.getModelByType(loopback.Role);
+      this.userModel = reg.getModelByType(loopback.User);
+      this.applicationModel = reg.getModelByType(loopback.Application);
+    }
+  };
+
+  /**
+   * Get the application principal
+   * @callback {Function} callback
+   * @param {Error} err
+   * @param {Application} application
+   */
+  RoleMapping.prototype.application = function(callback) {
+    this.constructor.resolveRelatedModels();
+
+    if (this.principalType === RoleMapping.APPLICATION) {
+      var applicationModel = this.constructor.applicationModel;
+      applicationModel.findById(this.principalId, callback);
+    } else {
+      process.nextTick(function() {
+        if (callback) callback(null, null);
+      });
+    }
+  };
+
+  /**
+   * Get the user principal
+   * @callback {Function} callback
+   * @param {Error} err
+   * @param {User} user
+   */
+  RoleMapping.prototype.user = function(callback) {
+    this.constructor.resolveRelatedModels();
+    if (this.principalType === RoleMapping.USER) {
+      var userModel = this.constructor.userModel;
+      userModel.findById(this.principalId, callback);
+    } else {
+      process.nextTick(function() {
+        if (callback) callback(null, null);
+      });
+    }
+  };
+
+  /**
+   * Get the child role principal
+   * @callback {Function} callback
+   * @param {Error} err
+   * @param {User} childUser
+   */
+  RoleMapping.prototype.childRole = function(callback) {
+    this.constructor.resolveRelatedModels();
+
+    if (this.principalType === RoleMapping.ROLE) {
+      var roleModel = this.constructor.roleModel;
+      roleModel.findById(this.principalId, callback);
+    } else {
+      process.nextTick(function() {
+        if (callback) callback(null, null);
+      });
+    }
+  };
+};
+
+}).call(this,require('_process'))
+},{"../../lib/loopback":558,"_process":279}],543:[function(require,module,exports){
+arguments[4][228][0].apply(exports,arguments)
+},{"dup":228}],544:[function(require,module,exports){
+(function (process){
+var loopback = require('../../lib/loopback');
+var debug = require('debug')('loopback:security:role');
+var assert = require('assert');
+var async = require('async');
+
+var AccessContext = require('../../lib/access-context').AccessContext;
+
+var RoleMapping = loopback.RoleMapping;
+
+assert(RoleMapping, 'RoleMapping model must be defined before Role model');
+
+/**
+ * The Role model
+ * @class Role
+ * @header Role object
+ */
+module.exports = function(Role) {
+
+  // Workaround for https://github.com/strongloop/loopback/issues/292
+  Role.definition.rawProperties.created.default =
+    Role.definition.properties.created.default = function() {
+    return new Date();
+  };
+
+  // Workaround for https://github.com/strongloop/loopback/issues/292
+  Role.definition.rawProperties.modified.default =
+    Role.definition.properties.modified.default = function() {
+    return new Date();
+  };
+
+  Role.resolveRelatedModels = function() {
+    if (!this.userModel) {
+      var reg = this.registry;
+      this.roleMappingModel = reg.getModelByType(loopback.RoleMapping);
+      this.userModel = reg.getModelByType(loopback.User);
+      this.applicationModel = reg.getModelByType(loopback.Application);
+    }
+  };
+
+  // Set up the connection to users/applications/roles once the model
+  Role.once('dataSourceAttached', function(roleModel) {
+
+    ['users', 'applications', 'roles'].forEach(function(rel) {
+      /**
+       * Fetch all users assigned to this role
+       * @function Role.prototype#users
+       * @param {object} [query] query object passed to model find call
+       * @param  {Function} [callback]
+       */
+      /**
+       * Fetch all applications assigned to this role
+       * @function Role.prototype#applications
+       * @param {object} [query] query object passed to model find call
+       * @param  {Function} [callback]
+       */
+      /**
+       * Fetch all roles assigned to this role
+       * @function Role.prototype#roles
+       * @param {object} [query] query object passed to model find call
+       * @param {Function} [callback]
+       */
+      Role.prototype[rel] = function(query, callback) {
+        roleModel.resolveRelatedModels();
+        var relsToModels = {
+          users: roleModel.userModel,
+          applications: roleModel.applicationModel,
+          roles: roleModel
+        };
+
+        var ACL = loopback.ACL;
+        var relsToTypes = {
+          users: ACL.USER,
+          applications: ACL.APP,
+          roles: ACL.ROLE
+        };
+
+        var model = relsToModels[rel];
+        listByPrincipalType(model, relsToTypes[rel], query, callback);
+      };
+    });
+
+    /**
+     * Fetch all models assigned to this role
+     * @private
+     * @param {*} model model type to fetch
+     * @param {String} [principalType] principalType used in the rolemapping for model
+     * @param {object} [query] query object passed to model find call
+     * @param  {Function} [callback] callback function called with `(err, models)` arguments.
+     */
+    function listByPrincipalType(model, principalType, query, callback) {
+      if (callback === undefined) {
+        callback = query;
+        query = {};
+      }
+
+      roleModel.roleMappingModel.find({
+        where: {roleId: this.id, principalType: principalType}
+      }, function(err, mappings) {
+        var ids;
+        if (err) {
+          return callback(err);
+        }
+        ids = mappings.map(function(m) {
+          return m.principalId;
+        });
+        query.where = query.where || {};
+        query.where.id = {inq: ids};
+        model.find(query, function(err, models) {
+          callback(err, models);
+        });
+      });
+    }
+
+  });
+
+  // Special roles
+  Role.OWNER = '$owner'; // owner of the object
+  Role.RELATED = '$related'; // any User with a relationship to the object
+  Role.AUTHENTICATED = '$authenticated'; // authenticated user
+  Role.UNAUTHENTICATED = '$unauthenticated'; // authenticated user
+  Role.EVERYONE = '$everyone'; // everyone
+
+  /**
+   * Add custom handler for roles.
+   * @param {String} role Name of role.
+   * @param {Function} resolver Function that determines if a principal is in the specified role.
+   * Signature must be `function(role, context, callback)`
+   */
+  Role.registerResolver = function(role, resolver) {
+    if (!Role.resolvers) {
+      Role.resolvers = {};
+    }
+    Role.resolvers[role] = resolver;
+  };
+
+  Role.registerResolver(Role.OWNER, function(role, context, callback) {
+    if (!context || !context.model || !context.modelId) {
+      process.nextTick(function() {
+        if (callback) callback(null, false);
+      });
+      return;
+    }
+    var modelClass = context.model;
+    var modelId = context.modelId;
+    var userId = context.getUserId();
+    Role.isOwner(modelClass, modelId, userId, callback);
+  });
+
+  function isUserClass(modelClass) {
+    if (modelClass) {
+      return modelClass === loopback.User ||
+        modelClass.prototype instanceof loopback.User;
+    } else {
+      return false;
+    }
+  }
+
+  /*!
+   * Check if two user IDs matches
+   * @param {*} id1
+   * @param {*} id2
+   * @returns {boolean}
+   */
+  function matches(id1, id2) {
+    if (id1 === undefined || id1 === null || id1 === '' ||
+      id2 === undefined || id2 === null || id2 === '') {
+      return false;
+    }
+    // The id can be a MongoDB ObjectID
+    return id1 === id2 || id1.toString() === id2.toString();
+  }
+
+  /**
+   * Check if a given user ID is the owner the model instance.
+   * @param {Function} modelClass The model class
+   * @param {*} modelId The model ID
+   * @param {*} userId The user ID
+   * @param {Function} callback Callback function
+   */
+  Role.isOwner = function isOwner(modelClass, modelId, userId, callback) {
+    assert(modelClass, 'Model class is required');
+    debug('isOwner(): %s %s userId: %s', modelClass && modelClass.modelName, modelId, userId);
+    // No userId is present
+    if (!userId) {
+      process.nextTick(function() {
+        callback(null, false);
+      });
+      return;
+    }
+
+    // Is the modelClass User or a subclass of User?
+    if (isUserClass(modelClass)) {
+      process.nextTick(function() {
+        callback(null, matches(modelId, userId));
+      });
+      return;
+    }
+
+    modelClass.findById(modelId, function(err, inst) {
+      if (err || !inst) {
+        debug('Model not found for id %j', modelId);
+        if (callback) callback(err, false);
+        return;
+      }
+      debug('Model found: %j', inst);
+      var ownerId = inst.userId || inst.owner;
+      // Ensure ownerId exists and is not a function/relation
+      if (ownerId && 'function' !== typeof ownerId) {
+        if (callback) callback(null, matches(ownerId, userId));
+        return;
+      } else {
+        // Try to follow belongsTo
+        for (var r in modelClass.relations) {
+          var rel = modelClass.relations[r];
+          if (rel.type === 'belongsTo' && isUserClass(rel.modelTo)) {
+            debug('Checking relation %s to %s: %j', r, rel.modelTo.modelName, rel);
+            inst[r](processRelatedUser);
+            return;
+          }
+        }
+        debug('No matching belongsTo relation found for model %j and user: %j', modelId, userId);
+        if (callback) callback(null, false);
+      }
+
+      function processRelatedUser(err, user) {
+        if (!err && user) {
+          debug('User found: %j', user.id);
+          if (callback) callback(null, matches(user.id, userId));
+        } else {
+          if (callback) callback(err, false);
+        }
+      }
+    });
+  };
+
+  Role.registerResolver(Role.AUTHENTICATED, function(role, context, callback) {
+    if (!context) {
+      process.nextTick(function() {
+        if (callback) callback(null, false);
+      });
+      return;
+    }
+    Role.isAuthenticated(context, callback);
+  });
+
+  /**
+   * Check if the user ID is authenticated
+   * @param {Object} context The security context.
+   *
+   * @callback {Function} callback Callback function.
+   * @param {Error} err Error object.
+   * @param {Boolean} isAuthenticated True if the user is authenticated.
+   */
+  Role.isAuthenticated = function isAuthenticated(context, callback) {
+    process.nextTick(function() {
+      if (callback) callback(null, context.isAuthenticated());
+    });
+  };
+
+  Role.registerResolver(Role.UNAUTHENTICATED, function(role, context, callback) {
+    process.nextTick(function() {
+      if (callback) callback(null, !context || !context.isAuthenticated());
+    });
+  });
+
+  Role.registerResolver(Role.EVERYONE, function(role, context, callback) {
+    process.nextTick(function() {
+      if (callback) callback(null, true); // Always true
+    });
+  });
+
+  /**
+   * Check if a given principal is in the specified role.
+   *
+   * @param {String} role The role name.
+   * @param {Object} context The context object.
+   *
+   * @callback {Function} callback Callback function.
+   * @param {Error} err Error object.
+   * @param {Boolean} isInRole True if the principal is in the specified role.
+   */
+  Role.isInRole = function(role, context, callback) {
+    if (!(context instanceof AccessContext)) {
+      context = new AccessContext(context);
+    }
+
+    this.resolveRelatedModels();
+
+    debug('isInRole(): %s', role);
+    context.debug();
+
+    var resolver = Role.resolvers[role];
+    if (resolver) {
+      debug('Custom resolver found for role %s', role);
+      resolver(role, context, callback);
+      return;
+    }
+
+    if (context.principals.length === 0) {
+      debug('isInRole() returns: false');
+      process.nextTick(function() {
+        if (callback) callback(null, false);
+      });
+      return;
+    }
+
+    var inRole = context.principals.some(function(p) {
+
+      var principalType = p.type || undefined;
+      var principalId = p.id || undefined;
+
+      // Check if it's the same role
+      return principalType === RoleMapping.ROLE && principalId === role;
+    });
+
+    if (inRole) {
+      debug('isInRole() returns: %j', inRole);
+      process.nextTick(function() {
+        if (callback) callback(null, true);
+      });
+      return;
+    }
+
+    var roleMappingModel = this.roleMappingModel;
+    this.findOne({where: {name: role}}, function(err, result) {
+      if (err) {
+        if (callback) callback(err);
+        return;
+      }
+      if (!result) {
+        if (callback) callback(null, false);
+        return;
+      }
+      debug('Role found: %j', result);
+
+      // Iterate through the list of principals
+      async.some(context.principals, function(p, done) {
+        var principalType = p.type || undefined;
+        var principalId = p.id || undefined;
+        var roleId = result.id.toString();
+
+        if (principalId !== null && principalId !== undefined && (typeof principalId !== 'string')) {
+          principalId = principalId.toString();
+        }
+
+        if (principalType && principalId) {
+          roleMappingModel.findOne({where: {roleId: roleId,
+              principalType: principalType, principalId: principalId}},
+            function(err, result) {
+              debug('Role mapping found: %j', result);
+              done(!err && result); // The only arg is the result
+            });
+        } else {
+          process.nextTick(function() {
+            done(false);
+          });
+        }
+      }, function(inRole) {
+        debug('isInRole() returns: %j', inRole);
+        if (callback) callback(null, inRole);
+      });
+    });
+
+  };
+
+  /**
+   * List roles for a given principal.
+   * @param {Object} context The security context.
+   *
+   * @callback {Function} callback Callback function.
+   * @param {Error} err Error object.
+   * @param {String[]} roles An array of role IDs
+   */
+  Role.getRoles = function(context, callback) {
+    if (!(context instanceof AccessContext)) {
+      context = new AccessContext(context);
+    }
+    var roles = [];
+    this.resolveRelatedModels();
+
+    var addRole = function(role) {
+      if (role && roles.indexOf(role) === -1) {
+        roles.push(role);
+      }
+    };
+
+    var self = this;
+    // Check against the smart roles
+    var inRoleTasks = [];
+    Object.keys(Role.resolvers).forEach(function(role) {
+      inRoleTasks.push(function(done) {
+        self.isInRole(role, context, function(err, inRole) {
+          if (debug.enabled) {
+            debug('In role %j: %j', role, inRole);
+          }
+          if (!err && inRole) {
+            addRole(role);
+            done();
+          } else {
+            done(err, null);
+          }
+        });
+      });
+    });
+
+    var roleMappingModel = this.roleMappingModel;
+    context.principals.forEach(function(p) {
+      // Check against the role mappings
+      var principalType = p.type || undefined;
+      var principalId = p.id == null ? undefined : p.id;
+
+      if (typeof principalId !== 'string' && principalId != null) {
+        principalId = principalId.toString();
+      }
+
+      // Add the role itself
+      if (principalType === RoleMapping.ROLE && principalId) {
+        addRole(principalId);
+      }
+
+      if (principalType && principalId) {
+        // Please find() treat undefined matches all values
+        inRoleTasks.push(function(done) {
+          roleMappingModel.find({where: {principalType: principalType,
+            principalId: principalId}}, function(err, mappings) {
+            debug('Role mappings found: %s %j', err, mappings);
+            if (err) {
+              if (done) done(err);
+              return;
+            }
+            mappings.forEach(function(m) {
+              addRole(m.roleId);
+            });
+            if (done) done();
+          });
+        });
+      }
+    });
+
+    async.parallel(inRoleTasks, function(err, results) {
+      debug('getRoles() returns: %j %j', err, roles);
+      if (callback) callback(err, roles);
+    });
+  };
+};
+
+}).call(this,require('_process'))
+},{"../../lib/access-context":550,"../../lib/loopback":558,"_process":279,"assert":22,"async":411,"debug":419}],545:[function(require,module,exports){
+arguments[4][229][0].apply(exports,arguments)
+},{"dup":229}],546:[function(require,module,exports){
+arguments[4][230][0].apply(exports,arguments)
+},{"../../lib/loopback":558,"assert":22,"dup":230}],547:[function(require,module,exports){
+arguments[4][231][0].apply(exports,arguments)
+},{"dup":231}],548:[function(require,module,exports){
+(function (__dirname){
+/*!
+ * Module Dependencies.
+ */
+
+var loopback = require('../../lib/loopback');
+var utils = require('../../lib/utils');
+var path = require('path');
+var SALT_WORK_FACTOR = 10;
+var crypto = require('crypto');
+
+var bcrypt;
+try {
+  // Try the native module first
+  bcrypt = require('bcrypt');
+  // Browserify returns an empty object
+  if (bcrypt && typeof bcrypt.compare !== 'function') {
+    bcrypt = require('bcryptjs');
+  }
+} catch (err) {
+  // Fall back to pure JS impl
+  bcrypt = require('bcryptjs');
+}
+
+var DEFAULT_TTL = 1209600; // 2 weeks in seconds
+var DEFAULT_RESET_PW_TTL = 15 * 60; // 15 mins in seconds
+var DEFAULT_MAX_TTL = 31556926; // 1 year in seconds
+var assert = require('assert');
+
+var debug = require('debug')('loopback:user');
+
+/**
+ * Built-in User model.
+ * Extends LoopBack [PersistedModel](#persistedmodel-new-persistedmodel).
+ *
+ * Default `User` ACLs.
+ *
+ * - DENY EVERYONE `*`
+ * - ALLOW EVERYONE `create`
+ * - ALLOW OWNER `deleteById`
+ * - ALLOW EVERYONE `login`
+ * - ALLOW EVERYONE `logout`
+ * - ALLOW OWNER `findById`
+ * - ALLOW OWNER `updateAttributes`
+ *
+ * @property {String} username Must be unique.
+ * @property {String} password Hidden from remote clients.
+ * @property {String} email Must be valid email.
+ * @property {Boolean} emailVerified Set when a user's email has been verified via `confirm()`.
+ * @property {String} verificationToken Set when `verify()` is called.
+ * @property {String} realm The namespace the user belongs to. See [Partitioning users with realms](https://docs.strongloop.com/display/public/LB/Partitioning+users+with+realms) for details.
+ * @property {Date} created The property is not used by LoopBack, you are free to use it for your own purposes.
+ * @property {Date} lastUpdated The property is not used by LoopBack, you are free to use it for your own purposes.
+ * @property {String} status The property is not used by LoopBack, you are free to use it for your own purposes.
+ * @property {Object} settings Extends the `Model.settings` object.
+ * @property {Boolean} settings.emailVerificationRequired Require the email verification
+ * process before allowing a login.
+ * @property {Number} settings.ttl Default time to live (in seconds) for the `AccessToken` created by `User.login() / user.createAccessToken()`.
+ * Default is `1209600` (2 weeks)
+ * @property {Number} settings.maxTTL The max value a user can request a token to be alive / valid for.
+ * Default is `31556926` (1 year)
+ * @property {Boolean} settings.realmRequired Require a realm when logging in a user.
+ * @property {String} settings.realmDelimiter When set a realm is required.
+ * @property {Number} settings.resetPasswordTokenTTL Time to live for password reset `AccessToken`. Default is `900` (15 minutes).
+ * @property {Number} settings.saltWorkFactor The `bcrypt` salt work factor. Default is `10`.
+ * @property {Boolean} settings.caseSensitiveEmail Enable case sensitive email.
+ *
+ * @class User
+ * @inherits {PersistedModel}
+ */
+
+module.exports = function(User) {
+
+  /**
+   * Create access token for the logged in user. This method can be overridden to
+   * customize how access tokens are generated
+   *
+   * @param {Number} ttl The requested ttl
+   * @param {Object} [options] The options for access token, such as scope, appId
+   * @callback {Function} cb The callback function
+   * @param {String|Error} err The error string or object
+   * @param {AccessToken} token The generated access token object
+   */
+  User.prototype.createAccessToken = function(ttl, options, cb) {
+    if (cb === undefined && typeof options === 'function') {
+      // createAccessToken(ttl, cb)
+      cb = options;
+      options = undefined;
+    }
+
+    cb = cb || utils.createPromiseCallback();
+
+    if (typeof ttl === 'object' && !options) {
+      // createAccessToken(options, cb)
+      options = ttl;
+      ttl = options.ttl;
+    }
+    options = options || {};
+    var userModel = this.constructor;
+    ttl = Math.min(ttl || userModel.settings.ttl, userModel.settings.maxTTL);
+    this.accessTokens.create({
+      ttl: ttl
+    }, cb);
+    return cb.promise;
+  };
+
+  function splitPrincipal(name, realmDelimiter) {
+    var parts = [null, name];
+    if (!realmDelimiter) {
+      return parts;
+    }
+    var index = name.indexOf(realmDelimiter);
+    if (index !== -1) {
+      parts[0] = name.substring(0, index);
+      parts[1] = name.substring(index + realmDelimiter.length);
+    }
+    return parts;
+  }
+
+  /**
+   * Normalize the credentials
+   * @param {Object} credentials The credential object
+   * @param {Boolean} realmRequired
+   * @param {String} realmDelimiter The realm delimiter, if not set, no realm is needed
+   * @returns {Object} The normalized credential object
+   */
+  User.normalizeCredentials = function(credentials, realmRequired, realmDelimiter) {
+    var query = {};
+    credentials = credentials || {};
+    if (!realmRequired) {
+      if (credentials.email) {
+        query.email = credentials.email;
+      } else if (credentials.username) {
+        query.username = credentials.username;
+      }
+    } else {
+      if (credentials.realm) {
+        query.realm = credentials.realm;
+      }
+      var parts;
+      if (credentials.email) {
+        parts = splitPrincipal(credentials.email, realmDelimiter);
+        query.email = parts[1];
+        if (parts[0]) {
+          query.realm = parts[0];
+        }
+      } else if (credentials.username) {
+        parts = splitPrincipal(credentials.username, realmDelimiter);
+        query.username = parts[1];
+        if (parts[0]) {
+          query.realm = parts[0];
+        }
+      }
+    }
+    return query;
+  };
+
+  /**
+   * Login a user by with the given `credentials`.
+   *
+   * ```js
+   *    User.login({username: 'foo', password: 'bar'}, function (err, token) {
+  *      console.log(token.id);
+  *    });
+   * ```
+   *
+   * @param {Object} credentials username/password or email/password
+   * @param {String[]|String} [include] Optionally set it to "user" to include
+   * the user info
+   * @callback {Function} callback Callback function
+   * @param {Error} err Error object
+   * @param {AccessToken} token Access token if login is successful
+   */
+
+  User.login = function(credentials, include, fn) {
+    var self = this;
+    if (typeof include === 'function') {
+      fn = include;
+      include = undefined;
+    }
+
+    fn = fn || utils.createPromiseCallback();
+
+    include = (include || '');
+    if (Array.isArray(include)) {
+      include = include.map(function(val) {
+        return val.toLowerCase();
+      });
+    } else {
+      include = include.toLowerCase();
+    }
+
+    var realmDelimiter;
+    // Check if realm is required
+    var realmRequired = !!(self.settings.realmRequired ||
+      self.settings.realmDelimiter);
+    if (realmRequired) {
+      realmDelimiter = self.settings.realmDelimiter;
+    }
+    var query = self.normalizeCredentials(credentials, realmRequired,
+      realmDelimiter);
+
+    if (realmRequired && !query.realm) {
+      var err1 = new Error('realm is required');
+      err1.statusCode = 400;
+      err1.code = 'REALM_REQUIRED';
+      fn(err1);
+      return fn.promise;
+    }
+    if (!query.email && !query.username) {
+      var err2 = new Error('username or email is required');
+      err2.statusCode = 400;
+      err2.code = 'USERNAME_EMAIL_REQUIRED';
+      fn(err2);
+      return fn.promise;
+    }
+
+    self.findOne({where: query}, function(err, user) {
+      var defaultError = new Error('login failed');
+      defaultError.statusCode = 401;
+      defaultError.code = 'LOGIN_FAILED';
+
+      function tokenHandler(err, token) {
+        if (err) return fn(err);
+        if (Array.isArray(include) ? include.indexOf('user') !== -1 : include === 'user') {
+          // NOTE(bajtos) We can't set token.user here:
+          //  1. token.user already exists, it's a function injected by
+          //     "AccessToken belongsTo User" relation
+          //  2. ModelBaseClass.toJSON() ignores own properties, thus
+          //     the value won't be included in the HTTP response
+          // See also loopback#161 and loopback#162
+          token.__data.user = user;
+        }
+        fn(err, token);
+      }
+
+      if (err) {
+        debug('An error is reported from User.findOne: %j', err);
+        fn(defaultError);
+      } else if (user) {
+        user.hasPassword(credentials.password, function(err, isMatch) {
+          if (err) {
+            debug('An error is reported from User.hasPassword: %j', err);
+            fn(defaultError);
+          } else if (isMatch) {
+            if (self.settings.emailVerificationRequired && !user.emailVerified) {
+              // Fail to log in if email verification is not done yet
+              debug('User email has not been verified');
+              err = new Error('login failed as the email has not been verified');
+              err.statusCode = 401;
+              err.code = 'LOGIN_FAILED_EMAIL_NOT_VERIFIED';
+              fn(err);
+            } else {
+              if (user.createAccessToken.length === 2) {
+                user.createAccessToken(credentials.ttl, tokenHandler);
+              } else {
+                user.createAccessToken(credentials.ttl, credentials, tokenHandler);
+              }
+            }
+          } else {
+            debug('The password is invalid for user %s', query.email || query.username);
+            fn(defaultError);
+          }
+        });
+      } else {
+        debug('No matching record is found for user %s', query.email || query.username);
+        fn(defaultError);
+      }
+    });
+    return fn.promise;
+  };
+
+  /**
+   * Logout a user with the given accessToken id.
+   *
+   * ```js
+   *    User.logout('asd0a9f8dsj9s0s3223mk', function (err) {
+  *      console.log(err || 'Logged out');
+  *    });
+   * ```
+   *
+   * @param {String} accessTokenID
+   * @callback {Function} callback
+   * @param {Error} err
+   */
+
+  User.logout = function(tokenId, fn) {
+    fn = fn || utils.createPromiseCallback();
+    this.relations.accessTokens.modelTo.findById(tokenId, function(err, accessToken) {
+      if (err) {
+        fn(err);
+      } else if (accessToken) {
+        accessToken.destroy(fn);
+      } else {
+        fn(new Error('could not find accessToken'));
+      }
+    });
+    return fn.promise;
+  };
+
+  /**
+   * Compare the given `password` with the users hashed password.
+   *
+   * @param {String} password The plain text password
+   * @returns {Boolean}
+   */
+
+  User.prototype.hasPassword = function(plain, fn) {
+    fn = fn || utils.createPromiseCallback();
+    if (this.password && plain) {
+      bcrypt.compare(plain, this.password, function(err, isMatch) {
+        if (err) return fn(err);
+        fn(null, isMatch);
+      });
+    } else {
+      fn(null, false);
+    }
+    return fn.promise;
+  };
+
+  /**
+   * Verify a user's identity by sending them a confirmation email.
+   *
+   * ```js
+   *    var options = {
+   *      type: 'email',
+   *      to: user.email,
+   *      template: 'verify.ejs',
+   *      redirect: '/',
+   *      tokenGenerator: function (user, cb) { cb("random-token"); }
+   *    };
+   *
+   *    user.verify(options, next);
+   * ```
+   *
+   * @options {Object} options
+   * @property {String} type Must be 'email'.
+   * @property {String} to Email address to which verification email is sent.
+   * @property {String} from Sender email addresss, for example
+   *   `'noreply@myapp.com'`.
+   * @property {String} subject Subject line text.
+   * @property {String} text Text of email.
+   * @property {String} template Name of template that displays verification
+   *  page, for example, `'verify.ejs'.
+   * @property {String} redirect Page to which user will be redirected after
+   *  they verify their email, for example `'/'` for root URI.
+   * @property {Function} generateVerificationToken A function to be used to
+   *  generate the verification token. It must accept the user object and a
+   *  callback function. This function should NOT add the token to the user
+   *  object, instead simply execute the callback with the token! User saving
+   *  and email sending will be handled in the `verify()` method.
+   */
+
+  User.prototype.verify = function(options, fn) {
+    fn = fn || utils.createPromiseCallback();
+
+    var user = this;
+    var userModel = this.constructor;
+    var registry = userModel.registry;
+    assert(typeof options === 'object', 'options required when calling user.verify()');
+    assert(options.type, 'You must supply a verification type (options.type)');
+    assert(options.type === 'email', 'Unsupported verification type');
+    assert(options.to || this.email, 'Must include options.to when calling user.verify() or the user must have an email property');
+    assert(options.from, 'Must include options.from when calling user.verify()');
+
+    options.redirect = options.redirect || '/';
+    options.template = path.resolve(options.template || path.join(__dirname, '..', '..', 'templates', 'verify.ejs'));
+    options.user = this;
+    options.protocol = options.protocol || 'http';
+
+    var app = userModel.app;
+    options.host = options.host || (app && app.get('host')) || 'localhost';
+    options.port = options.port || (app && app.get('port')) || 3000;
+    options.restApiRoot = options.restApiRoot || (app && app.get('restApiRoot')) || '/api';
+
+    var displayPort = (
+      (options.protocol === 'http' && options.port == '80') ||
+      (options.protocol === 'https' && options.port == '443')
+    ) ? '' : ':' + options.port;
+
+    options.verifyHref = options.verifyHref ||
+      options.protocol +
+      '://' +
+      options.host +
+      displayPort +
+      options.restApiRoot +
+      userModel.http.path +
+      userModel.sharedClass.find('confirm', true).http.path +
+      '?uid=' +
+      options.user.id +
+      '&redirect=' +
+      options.redirect;
+
+    // Email model
+    var Email = options.mailer || this.constructor.email || registry.getModelByType(loopback.Email);
+
+    // Set a default token generation function if one is not provided
+    var tokenGenerator = options.generateVerificationToken || User.generateVerificationToken;
+
+    tokenGenerator(user, function(err, token) {
+      if (err) { return fn(err); }
+
+      user.verificationToken = token;
+      user.save(function(err) {
+        if (err) {
+          fn(err);
+        } else {
+          sendEmail(user);
+        }
+      });
+    });
+
+    // TODO - support more verification types
+    function sendEmail(user) {
+      options.verifyHref += '&token=' + user.verificationToken;
+
+      options.text = options.text || 'Please verify your email by opening this link in a web browser:\n\t{href}';
+
+      options.text = options.text.replace('{href}', options.verifyHref);
+
+      options.to = options.to || user.email;
+
+      options.subject = options.subject || 'Thanks for Registering';
+
+      options.headers = options.headers || {};
+
+      var template = loopback.template(options.template);
+      options.html = template(options);
+
+      Email.send(options, function(err, email) {
+        if (err) {
+          fn(err);
+        } else {
+          fn(null, {email: email, token: user.verificationToken, uid: user.id});
+        }
+      });
+    }
+    return fn.promise;
+  };
+
+  /**
+   * A default verification token generator which accepts the user the token is
+   * being generated for and a callback function to indicate completion.
+   * This one uses the crypto library and 64 random bytes (converted to hex)
+   * for the token. When used in combination with the user.verify() method this
+   * function will be called with the `user` object as it's context (`this`).
+   *
+   * @param {object} user The User this token is being generated for.
+   * @param {Function} cb The generator must pass back the new token with this function call
+   */
+  User.generateVerificationToken = function(user, cb) {
+    crypto.randomBytes(64, function(err, buf) {
+      cb(err, buf && buf.toString('hex'));
+    });
+  };
+
+  /**
+   * Confirm the user's identity.
+   *
+   * @param {Any} userId
+   * @param {String} token The validation token
+   * @param {String} redirect URL to redirect the user to once confirmed
+   * @callback {Function} callback
+   * @param {Error} err
+   */
+  User.confirm = function(uid, token, redirect, fn) {
+    fn = fn || utils.createPromiseCallback();
+    this.findById(uid, function(err, user) {
+      if (err) {
+        fn(err);
+      } else {
+        if (user && user.verificationToken === token) {
+          user.verificationToken = undefined;
+          user.emailVerified = true;
+          user.save(function(err) {
+            if (err) {
+              fn(err);
+            } else {
+              fn();
+            }
+          });
+        } else {
+          if (user) {
+            err = new Error('Invalid token: ' + token);
+            err.statusCode = 400;
+            err.code = 'INVALID_TOKEN';
+          } else {
+            err = new Error('User not found: ' + uid);
+            err.statusCode = 404;
+            err.code = 'USER_NOT_FOUND';
+          }
+          fn(err);
+        }
+      }
+    });
+    return fn.promise;
+  };
+
+  /**
+   * Create a short lived acess token for temporary login. Allows users
+   * to change passwords if forgotten.
+   *
+   * @options {Object} options
+   * @prop {String} email The user's email address
+   * @callback {Function} callback
+   * @param {Error} err
+   */
+
+  User.resetPassword = function(options, cb) {
+    cb = cb || utils.createPromiseCallback();
+    var UserModel = this;
+    var ttl = UserModel.settings.resetPasswordTokenTTL || DEFAULT_RESET_PW_TTL;
+
+    options = options || {};
+    if (typeof options.email !== 'string') {
+      var err = new Error('Email is required');
+      err.statusCode = 400;
+      err.code = 'EMAIL_REQUIRED';
+      cb(err);
+      return cb.promise;
+    }
+
+    UserModel.findOne({ where: {email: options.email} }, function(err, user) {
+      if (err) {
+        return cb(err);
+      }
+      if (!user) {
+        err = new Error('Email not found');
+        err.statusCode = 404;
+        err.code = 'EMAIL_NOT_FOUND';
+        return cb(err);
+      }
+      // create a short lived access token for temp login to change password
+      // TODO(ritch) - eventually this should only allow password change
+      user.accessTokens.create({ttl: ttl}, function(err, accessToken) {
+        if (err) {
+          return cb(err);
+        }
+        cb();
+        UserModel.emit('resetPasswordRequest', {
+          email: options.email,
+          accessToken: accessToken,
+          user: user
+        });
+      });
+    });
+
+    return cb.promise;
+  };
+
+  /*!
+   * Hash the plain password
+   */
+  User.hashPassword = function(plain) {
+    this.validatePassword(plain);
+    var salt = bcrypt.genSaltSync(this.settings.saltWorkFactor || SALT_WORK_FACTOR);
+    return bcrypt.hashSync(plain, salt);
+  };
+
+  User.validatePassword = function(plain) {
+    if (typeof plain === 'string' && plain) {
+      return true;
+    }
+    var err =  new Error('Invalid password: ' + plain);
+    err.statusCode = 422;
+    throw err;
+  };
+
+  /*!
+   * Setup an extended user model.
+   */
+
+  User.setup = function() {
+    // We need to call the base class's setup method
+    User.base.setup.call(this);
+    var UserModel = this;
+
+    // max ttl
+    this.settings.maxTTL = this.settings.maxTTL || DEFAULT_MAX_TTL;
+    this.settings.ttl = this.settings.ttl || DEFAULT_TTL;
+
+    UserModel.setter.email = function(value) {
+      if (!UserModel.settings.caseSensitiveEmail) {
+        this.$email = value.toLowerCase();
+      } else {
+        this.$email = value;
+      }
+    };
+
+    UserModel.setter.password = function(plain) {
+      if (typeof plain !== 'string') {
+        return;
+      }
+      if (plain.indexOf('$2a$') === 0 && plain.length === 60) {
+        // The password is already hashed. It can be the case
+        // when the instance is loaded from DB
+        this.$password = plain;
+      } else {
+        this.$password = this.constructor.hashPassword(plain);
+      }
+    };
+
+    // Access token to normalize email credentials
+    UserModel.observe('access', function normalizeEmailCase(ctx, next) {
+      if (!ctx.Model.settings.caseSensitiveEmail && ctx.query.where && ctx.query.where.email) {
+        ctx.query.where.email = ctx.query.where.email.toLowerCase();
+      }
+      next();
+    });
+
+    // Make sure emailVerified is not set by creation
+    UserModel.beforeRemote('create', function(ctx, user, next) {
+      var body = ctx.req.body;
+      if (body && body.emailVerified) {
+        body.emailVerified = false;
+      }
+      next();
+    });
+
+    UserModel.remoteMethod(
+      'login',
+      {
+        description: 'Login a user with username/email and password.',
+        accepts: [
+          {arg: 'credentials', type: 'object', required: true, http: {source: 'body'}},
+          {arg: 'include', type: ['string'], http: {source: 'query' },
+            description: 'Related objects to include in the response. ' +
+            'See the description of return value for more details.'}
+        ],
+        returns: {
+          arg: 'accessToken', type: 'object', root: true,
+          description:
+            'The response body contains properties of the AccessToken created on login.\n' +
+            'Depending on the value of `include` parameter, the body may contain ' +
+            'additional properties:\n\n' +
+            '  - `user` - `{User}` - Data of the currently logged in user. (`include=user`)\n\n'
+        },
+        http: {verb: 'post'}
+      }
+    );
+
+    UserModel.remoteMethod(
+      'logout',
+      {
+        description: 'Logout a user with access token.',
+        accepts: [
+          {arg: 'access_token', type: 'string', required: true, http: function(ctx) {
+            var req = ctx && ctx.req;
+            var accessToken = req && req.accessToken;
+            var tokenID = accessToken && accessToken.id;
+
+            return tokenID;
+          }, description: 'Do not supply this argument, it is automatically extracted ' +
+            'from request headers.'
+          }
+        ],
+        http: {verb: 'all'}
+      }
+    );
+
+    UserModel.remoteMethod(
+      'confirm',
+      {
+        description: 'Confirm a user registration with email verification token.',
+        accepts: [
+          {arg: 'uid', type: 'string', required: true},
+          {arg: 'token', type: 'string', required: true},
+          {arg: 'redirect', type: 'string'}
+        ],
+        http: {verb: 'get', path: '/confirm'}
+      }
+    );
+
+    UserModel.remoteMethod(
+      'resetPassword',
+      {
+        description: 'Reset password for a user with email.',
+        accepts: [
+          {arg: 'options', type: 'object', required: true, http: {source: 'body'}}
+        ],
+        http: {verb: 'post', path: '/reset'}
+      }
+    );
+
+    UserModel.afterRemote('confirm', function(ctx, inst, next) {
+      if (ctx.args.redirect !== undefined) {
+        if (!ctx.res) {
+          return next(new Error('The transport does not support HTTP redirects.'));
+        }
+        ctx.res.location(ctx.args.redirect);
+        ctx.res.status(302);
+      }
+      next();
+    });
+
+    // default models
+    assert(loopback.Email, 'Email model must be defined before User model');
+    UserModel.email = loopback.Email;
+
+    assert(loopback.AccessToken, 'AccessToken model must be defined before User model');
+    UserModel.accessToken = loopback.AccessToken;
+
+    // email validation regex
+    var re = /^(([^<>()[\]\\.,;:\s@\"]+(\.[^<>()[\]\\.,;:\s@\"]+)*)|(\".+\"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
+
+    UserModel.validatesFormatOf('email', {with: re, message: 'Must provide a valid email'});
+
+    // FIXME: We need to add support for uniqueness of composite keys in juggler
+    if (!(UserModel.settings.realmRequired || UserModel.settings.realmDelimiter)) {
+      UserModel.validatesUniquenessOf('email', {message: 'Email already exists'});
+      UserModel.validatesUniquenessOf('username', {message: 'User already exists'});
+    }
+
+    return UserModel;
+  };
+
+  /*!
+   * Setup the base user.
+   */
+
+  User.setup();
+
+};
+
+}).call(this,"/..\\node_modules\\loopback\\common\\models")
+},{"../../lib/loopback":558,"../../lib/utils":563,"assert":22,"bcrypt":29,"bcryptjs":413,"crypto":72,"debug":419,"path":274}],549:[function(require,module,exports){
+arguments[4][232][0].apply(exports,arguments)
+},{"./lib/connectors/base-connector":554,"./lib/connectors/mail":555,"./lib/connectors/memory":556,"./lib/loopback":558,"dup":232,"loopback-connector-remote":488,"loopback-datasource-juggler":497,"loopback-datasource-juggler/lib/geo":502}],550:[function(require,module,exports){
+arguments[4][233][0].apply(exports,arguments)
+},{"./loopback":558,"assert":22,"debug":419,"dup":233}],551:[function(require,module,exports){
+(function (process,__dirname){
+/*!
+ * Module dependencies.
+ */
+
+var DataSource = require('loopback-datasource-juggler').DataSource;
+var Registry = require('./registry');
+var assert = require('assert');
+var fs = require('fs');
+var extend = require('util')._extend;
+var RemoteObjects = require('strong-remoting');
+var classify = require('underscore.string/classify');
+var camelize = require('underscore.string/camelize');
+var path = require('path');
+var util = require('util');
+
+/**
+ * The `App` object represents a Loopback application.
+ *
+ * The App object extends [Express](http://expressjs.com/api.html#express) and
+ * supports Express middleware. See
+ * [Express documentation](http://expressjs.com/) for details.
+ *
+ * ```js
+ * var loopback = require('loopback');
+ * var app = loopback();
+ *
+ * app.get('/', function(req, res){
+ *   res.send('hello world');
+ * });
+ *
+ * app.listen(3000);
+ * ```
+ *
+ * @class LoopBackApplication
+ * @header var app = loopback()
+ */
+function App() {
+  // this is a dummy placeholder for jsdox
+}
+
+/*!
+ * Export the app prototype.
+ */
+
+var app = module.exports = {};
+
+/**
+ * Lazily load a set of [remote objects](http://apidocs.strongloop.com/strong-remoting/#remoteobjectsoptions).
+ *
+ * **NOTE:** Calling `app.remotes()` more than once returns only a single set of remote objects.
+ * @returns {RemoteObjects}
+ */
+
+app.remotes = function() {
+  if (this._remotes) {
+    return this._remotes;
+  } else {
+    var options = {};
+
+    if (this.get) {
+      options = this.get('remoting');
+    }
+
+    return (this._remotes = RemoteObjects.create(options));
+  }
+};
+
+/*!
+ * Remove a route by reference.
+ */
+
+app.disuse = function(route) {
+  if (this.stack) {
+    for (var i = 0; i < this.stack.length; i++) {
+      if (this.stack[i].route === route) {
+        this.stack.splice(i, 1);
+      }
+    }
+  }
+};
+
+/**
+ * Attach a model to the app. The `Model` will be available on the
+ * `app.models` object.
+ *
+ * Example - Attach an existing model:
+ ```js
+ * var User = loopback.User;
+ * app.model(User);
+ *```
+ * Example - Attach an existing model, alter some aspects of the model:
+ * ```js
+ * var User = loopback.User;
+ * app.model(User, { dataSource: 'db' });
+ *```
+ *
+ * @param {Object|String} Model The model to attach.
+ * @options {Object} config The model's configuration.
+ * @property {String|DataSource} dataSource The `DataSource` to which to attach the model.
+ * @property {Boolean} [public] Whether the model should be exposed via REST API.
+ * @property {Object} [relations] Relations to add/update.
+ * @end
+ * @returns {ModelConstructor} the model class
+ */
+
+app.model = function(Model, config) {
+  var isPublic = true;
+  var registry = this.registry;
+
+  if (arguments.length > 1) {
+    config = config || {};
+    if (typeof Model === 'string') {
+      // create & attach the model - backwards compatibility
+
+      // create config for loopback.modelFromConfig
+      var modelConfig = extend({}, config);
+      modelConfig.options = extend({}, config.options);
+      modelConfig.name = Model;
+
+      // modeller does not understand `dataSource` option
+      delete modelConfig.dataSource;
+
+      Model = registry.createModel(modelConfig);
+
+      // delete config options already applied
+      ['relations', 'base', 'acls', 'hidden', 'methods'].forEach(function(prop) {
+        delete config[prop];
+        if (config.options) delete config.options[prop];
+      });
+      delete config.properties;
+    }
+
+    configureModel(Model, config, this);
+    isPublic = config.public !== false;
+  } else {
+    assert(Model.prototype instanceof Model.registry.getModel('Model'),
+      Model.modelName + ' must be a descendant of loopback.Model');
+  }
+
+  var modelName = Model.modelName;
+  this.models[modelName] =
+    this.models[classify(modelName)] =
+      this.models[camelize(modelName)] = Model;
+
+  this.models().push(Model);
+
+  if (isPublic && Model.sharedClass) {
+    this.remotes().addClass(Model.sharedClass);
+    if (Model.settings.trackChanges && Model.Change) {
+      this.remotes().addClass(Model.Change.sharedClass);
+    }
+    clearHandlerCache(this);
+    this.emit('modelRemoted', Model.sharedClass);
+  }
+
+  Model.shared = isPublic;
+  Model.app = this;
+  Model.emit('attached', this);
+  return Model;
+};
+
+/**
+ * Get the models exported by the app. Returns only models defined using `app.model()`
+ *
+ * There are two ways to access models:
+ *
+ * 1.  Call `app.models()` to get a list of all models.
+ *
+ * ```js
+ * var models = app.models();
+ *
+ * models.forEach(function(Model) {
+ *  console.log(Model.modelName); // color
+ * });
+ * ```
+ *
+ * 2. Use `app.model` to access a model by name.
+ * `app.models` has properties for all defined models.
+ *
+ * The following example illustrates accessing the `Product` and `CustomerReceipt` models
+ * using the `models` object.
+ *
+ * ```js
+ * var loopback = require('loopback');
+ *  var app = loopback();
+ *  app.boot({
+ *   dataSources: {
+ *     db: {connector: 'memory'}
+ *   }
+ * });
+ *
+ * app.model('product', {dataSource: 'db'});
+ * app.model('customer-receipt', {dataSource: 'db'});
+ *
+ * // available based on the given name
+ * var Product = app.models.Product;
+ *
+ * // also available as camelCase
+ * var product = app.models.product;
+ *
+ * // multi-word models are avaiable as pascal cased
+ * var CustomerReceipt = app.models.CustomerReceipt;
+ *
+ * // also available as camelCase
+ * var customerReceipt = app.models.customerReceipt;
+ * ```
+ *
+ * @returns {Array} Array of model classes.
+ */
+
+app.models = function() {
+  return this._models || (this._models = []);
+};
+
+/**
+ * Define a DataSource.
+ *
+ * @param {String} name The data source name
+ * @param {Object} config The data source config
+ */
+app.dataSource = function(name, config) {
+  var ds = dataSourcesFromConfig(name, config, this.connectors, this.registry);
+  this.dataSources[name] =
+  this.dataSources[classify(name)] =
+  this.dataSources[camelize(name)] = ds;
+  return ds;
+};
+
+/**
+ * Register a connector.
+ *
+ * When a new data-source is being added via `app.dataSource`, the connector
+ * name is looked up in the registered connectors first.
+ *
+ * Connectors are required to be explicitly registered only for applications
+ * using browserify, because browserify does not support dynamic require,
+ * which is used by LoopBack to automatically load the connector module.
+ *
+ * @param {String} name Name of the connector, e.g. 'mysql'.
+ * @param {Object} connector Connector object as returned
+ *   by `require('loopback-connector-{name}')`.
+ */
+app.connector = function(name, connector) {
+  this.connectors[name] =
+  this.connectors[classify(name)] =
+  this.connectors[camelize(name)] = connector;
+};
+
+/**
+ * Get all remote objects.
+ * @returns {Object} [Remote objects](http://apidocs.strongloop.com/strong-remoting/#remoteobjectsoptions).
+ */
+
+app.remoteObjects = function() {
+  var result = {};
+
+  this.remotes().classes().forEach(function(sharedClass) {
+    result[sharedClass.name] = sharedClass.ctor;
+  });
+
+  return result;
+};
+
+/*!
+ * Get a handler of the specified type from the handler cache.
+ * @triggers `mounted` events on shared class constructors (models)
+ */
+
+app.handler = function(type, options) {
+  var handlers = this._handlers || (this._handlers = {});
+  if (handlers[type]) {
+    return handlers[type];
+  }
+
+  var remotes = this.remotes();
+  var handler = this._handlers[type] = remotes.handler(type, options);
+
+  remotes.classes().forEach(function(sharedClass) {
+    sharedClass.ctor.emit('mounted', app, sharedClass, remotes);
+  });
+
+  return handler;
+};
+
+/**
+ * An object to store dataSource instances.
+ */
+
+app.dataSources = app.datasources = {};
+
+/**
+ * Enable app wide authentication.
+ */
+
+app.enableAuth = function(options) {
+  var AUTH_MODELS = ['User', 'AccessToken', 'ACL', 'Role', 'RoleMapping'];
+
+  var remotes = this.remotes();
+  var app = this;
+
+  if (options && options.dataSource) {
+    var appModels = app.registry.modelBuilder.models;
+    AUTH_MODELS.forEach(function(m) {
+      var Model = app.registry.findModel(m);
+      if (!Model) {
+        throw new Error(
+          'Authentication requires model ' + m + ' to be defined.');
+      }
+
+      if (m.dataSource || m.app) return;
+
+      for (var name in appModels) {
+        var candidate = appModels[name];
+        var isSubclass = candidate.prototype instanceof Model;
+        var isAttached = !!candidate.dataSource || !!candidate.app;
+        if (isSubclass && isAttached) return;
+      }
+
+      app.model(Model, {
+        dataSource: options.dataSource,
+        public: m === 'User'
+      });
+    });
+  }
+
+  remotes.authorization = function(ctx, next) {
+    var method = ctx.method;
+    var req = ctx.req;
+    var Model = method.ctor;
+    var modelInstance = ctx.instance;
+
+    var modelId = modelInstance && modelInstance.id ||
+      // replacement for deprecated req.param()
+      (req.params && req.params.id !== undefined ? req.params.id :
+       req.body && req.body.id !== undefined ? req.body.id :
+       req.query && req.query.id !== undefined ? req.query.id :
+       undefined);
+
+    var modelName = Model.modelName;
+
+    var modelSettings = Model.settings || {};
+    var errStatusCode = modelSettings.aclErrorStatus || app.get('aclErrorStatus') || 401;
+    if (!req.accessToken) {
+      errStatusCode = 401;
+    }
+
+    if (Model.checkAccess) {
+      Model.checkAccess(
+        req.accessToken,
+        modelId,
+        method,
+        ctx,
+        function(err, allowed) {
+          if (err) {
+            console.log(err);
+            next(err);
+          } else if (allowed) {
+            next();
+          } else {
+
+            var messages = {
+              403: {
+                message: 'Access Denied',
+                code: 'ACCESS_DENIED'
+              },
+              404: {
+                message: ('could not find ' + modelName + ' with id ' + modelId),
+                code: 'MODEL_NOT_FOUND'
+              },
+              401: {
+                message: 'Authorization Required',
+                code: 'AUTHORIZATION_REQUIRED'
+              }
+            };
+
+            var e = new Error(messages[errStatusCode].message || messages[403].message);
+            e.statusCode = errStatusCode;
+            e.code = messages[errStatusCode].code || messages[403].code;
+            next(e);
+          }
+        }
+      );
+    } else {
+      next();
+    }
+  };
+
+  this.isAuthEnabled = true;
+};
+
+app.boot = function(options) {
+  throw new Error(
+    '`app.boot` was removed, use the new module loopback-boot instead');
+};
+
+function dataSourcesFromConfig(name, config, connectorRegistry, registry) {
+  var connectorPath;
+
+  assert(typeof config === 'object',
+    'cannont create data source without config object');
+
+  if (typeof config.connector === 'string') {
+    name = config.connector;
+    if (connectorRegistry[name]) {
+      config.connector = connectorRegistry[name];
+    } else {
+      connectorPath = path.join(__dirname, 'connectors', name + '.js');
+
+      if (fs.existsSync(connectorPath)) {
+        config.connector = require(connectorPath);
+      }
+    }
+  }
+
+  return registry.createDataSource(config);
+}
+
+function configureModel(ModelCtor, config, app) {
+  assert(ModelCtor.prototype instanceof ModelCtor.registry.getModel('Model'),
+    ModelCtor.modelName + ' must be a descendant of loopback.Model');
+
+  var dataSource = config.dataSource;
+
+  if (dataSource) {
+    if (typeof dataSource === 'string') {
+      dataSource = app.dataSources[dataSource];
+    }
+
+    assert(
+      dataSource instanceof DataSource,
+      ModelCtor.modelName + ' is referencing a dataSource that does not exist: "' +
+      config.dataSource + '"'
+    );
+  }
+
+  config = extend({}, config);
+  config.dataSource = dataSource;
+
+  setSharedMethodSharedProperties(ModelCtor, app, config);
+
+  app.registry.configureModel(ModelCtor, config);
+}
+
+function setSharedMethodSharedProperties(model, app, modelConfigs) {
+  var settings = {};
+
+  // apply config.json settings
+  var config = app.get('remoting');
+  var configHasSharedMethodsSettings = config &&
+      config.sharedMethods &&
+      typeof config.sharedMethods === 'object';
+  if (configHasSharedMethodsSettings)
+    util._extend(settings, config.sharedMethods);
+
+  // apply model-config.json settings
+  var modelConfig = modelConfigs.options;
+  var modelConfigHasSharedMethodsSettings = modelConfig &&
+      modelConfig.remoting &&
+      modelConfig.remoting.sharedMethods &&
+      typeof modelConfig.remoting.sharedMethods === 'object';
+  if (modelConfigHasSharedMethodsSettings)
+    util._extend(settings, modelConfig.remoting.sharedMethods);
+
+  // validate setting values
+  Object.keys(settings).forEach(function(setting) {
+    var settingValue = settings[setting];
+    var settingValueType = typeof settingValue;
+    if (settingValueType !== 'boolean')
+      throw new TypeError('Expected boolean, got ' + settingValueType);
+  });
+
+  // set sharedMethod.shared using the merged settings
+  var sharedMethods = model.sharedClass.methods({includeDisabled: true});
+  sharedMethods.forEach(function(sharedMethod) {
+    // use the specific setting if it exists
+    var hasSpecificSetting = settings.hasOwnProperty(sharedMethod.name);
+    if (hasSpecificSetting) {
+      sharedMethod.shared = settings[sharedMethod.name];
+    } else { // otherwise, use the default setting if it exists
+      var hasDefaultSetting = settings.hasOwnProperty('*');
+      if (hasDefaultSetting)
+        sharedMethod.shared = settings['*'];
+    }
+  });
+}
+
+function clearHandlerCache(app) {
+  app._handlers = undefined;
+}
+
+/**
+ * Listen for connections and update the configured port.
+ *
+ * When there are no parameters or there is only one callback parameter,
+ * the server will listen on `app.get('host')` and `app.get('port')`.
+ *
+ * For example, to listen on host/port configured in app config:
+ * ```js
+ * app.listen();
+ * ```
+ *
+ * Otherwise all arguments are forwarded to `http.Server.listen`.
+ *
+ * For example, to listen on the specified port and all hosts, and ignore app config.
+ * ```js
+ * app.listen(80);
+ * ```
+ *
+ * The function also installs a `listening` callback that calls
+ * `app.set('port')` with the value returned by `server.address().port`.
+ * This way the port param contains always the real port number, even when
+ * listen was called with port number 0.
+ *
+ * @param {Function} [cb] If specified, the callback is added as a listener
+ *   for the server's "listening" event.
+ * @returns {http.Server} A node `http.Server` with this application configured
+ *   as the request handler.
+ */
+app.listen = function(cb) {
+  var self = this;
+
+  var server = require('http').createServer(this);
+
+  server.on('listening', function() {
+    self.set('port', this.address().port);
+
+    var listeningOnAll = false;
+    var host = self.get('host');
+    if (!host) {
+      listeningOnAll = true;
+      host = this.address().address;
+      self.set('host', host);
+    } else if (host === '0.0.0.0' || host === '::') {
+      listeningOnAll = true;
+    }
+
+    if (!self.get('url')) {
+      if (process.platform === 'win32' && listeningOnAll) {
+        // Windows browsers don't support `0.0.0.0` host in the URL
+        // We are replacing it with localhost to build a URL
+        // that can be copied and pasted into the browser.
+        host = 'localhost';
+      }
+      var url = 'http://' + host + ':' + self.get('port') + '/';
+      self.set('url', url);
+    }
+  });
+
+  var useAppConfig =
+    arguments.length === 0 ||
+      (arguments.length == 1 && typeof arguments[0] == 'function');
+
+  if (useAppConfig) {
+    server.listen(this.get('port'), this.get('host'), cb);
+  } else {
+    server.listen.apply(server, arguments);
+  }
+
+  return server;
+};
+
+}).call(this,require('_process'),"/..\\node_modules\\loopback\\lib")
+},{"./registry":561,"_process":279,"assert":22,"fs":56,"http":350,"loopback-datasource-juggler":497,"path":274,"strong-remoting":638,"underscore.string/camelize":670,"underscore.string/classify":672,"util":396}],552:[function(require,module,exports){
+arguments[4][235][0].apply(exports,arguments)
+},{"dup":235,"events":111,"util":396}],553:[function(require,module,exports){
+arguments[4][236][0].apply(exports,arguments)
+},{"../common/models/access-token.js":530,"../common/models/access-token.json":529,"../common/models/acl.js":532,"../common/models/acl.json":531,"../common/models/application.js":534,"../common/models/application.json":533,"../common/models/change.js":536,"../common/models/change.json":535,"../common/models/checkpoint.js":538,"../common/models/checkpoint.json":537,"../common/models/email.js":540,"../common/models/email.json":539,"../common/models/role-mapping.js":542,"../common/models/role-mapping.json":541,"../common/models/role.js":544,"../common/models/role.json":543,"../common/models/scope.js":546,"../common/models/scope.json":545,"../common/models/user.js":548,"../common/models/user.json":547,"dup":236}],554:[function(require,module,exports){
+arguments[4][237][0].apply(exports,arguments)
+},{"assert":22,"debug":419,"dup":237,"events":111,"util":396}],555:[function(require,module,exports){
+arguments[4][238][0].apply(exports,arguments)
+},{"../loopback":558,"_process":279,"assert":22,"debug":419,"dup":238,"nodemailer":29}],556:[function(require,module,exports){
+arguments[4][239][0].apply(exports,arguments)
+},{"./base-connector":554,"assert":22,"debug":419,"dup":239,"loopback-datasource-juggler/lib/connectors/memory":499,"util":396}],557:[function(require,module,exports){
+(function (__dirname){
+var path = require('path');
+
+var middlewares = exports;
+
+function safeRequire(m) {
+  try {
+    return require(m);
+  } catch (err) {
+    return undefined;
+  }
+}
+
+function createMiddlewareNotInstalled(memberName, moduleName) {
+  return function() {
+    var msg = 'The middleware loopback.' + memberName + ' is not installed.\n' +
+      'Run `npm install --save ' + moduleName + '` to fix the problem.';
+    throw new Error(msg);
+  };
+}
+
+var middlewareModules = {
+  'compress': 'compression',
+  'timeout': 'connect-timeout',
+  'cookieParser': 'cookie-parser',
+  'cookieSession': 'cookie-session',
+  'csrf': 'csurf',
+  'errorHandler': 'errorhandler',
+  'session': 'express-session',
+  'methodOverride': 'method-override',
+  'logger': 'morgan',
+  'responseTime': 'response-time',
+  'favicon': 'serve-favicon',
+  'directory': 'serve-index',
+  // 'static': 'serve-static',
+  'vhost': 'vhost'
+};
+
+middlewares.bodyParser = safeRequire('body-parser');
+middlewares.json = middlewares.bodyParser && middlewares.bodyParser.json;
+middlewares.urlencoded = middlewares.bodyParser && middlewares.bodyParser.urlencoded;
+
+for (var m in middlewareModules) {
+  var moduleName = middlewareModules[m];
+  middlewares[m] = safeRequire(moduleName) || createMiddlewareNotInstalled(m, moduleName);
+}
+
+// serve-favicon requires a path
+var favicon = middlewares.favicon;
+middlewares.favicon = function(icon, options) {
+  icon = icon || path.join(__dirname, '../favicon.ico');
+  return favicon(icon, options);
+};
+
+}).call(this,"/..\\node_modules\\loopback\\lib")
+},{"path":274}],558:[function(require,module,exports){
+(function (__dirname){
+/*!
+ * Module dependencies.
+ */
+
+var express = require('express');
+var loopbackExpress = require('./server-app');
+var proto = require('./application');
+var fs = require('fs');
+var ejs = require('ejs');
+var path = require('path');
+var merge = require('util')._extend;
+var assert = require('assert');
+var Registry = require('./registry');
+var juggler = require('loopback-datasource-juggler');
+
+/**
+ * LoopBack core module. It provides static properties and
+ * methods to create models and data sources. The module itself is a function
+ * that creates loopback `app`. For example:
+ *
+ * ```js
+ * var loopback = require('loopback');
+ * var app = loopback();
+ * ```
+ *
+ * @property {String} version Version of LoopBack framework.  Static read-only property.
+ * @property {String} mime
+ * @property {Boolean} isBrowser True if running in a browser environment; false otherwise.  Static read-only property.
+ * @property {Boolean} isServer True if running in a server environment; false otherwise.  Static read-only property.
+ * @property {Registry} registry The global `Registry` object.
+ * @property {String} faviconFile Path to a default favicon shipped with LoopBack.
+ * Use as follows: `app.use(require('serve-favicon')(loopback.faviconFile));`
+ * @class loopback
+ * @header loopback
+ */
+
+var loopback = module.exports = createApplication;
+
+/*!
+ * Framework version.
+ */
+
+loopback.version = require('../package.json').version;
+
+/*!
+ * Expose mime.
+ */
+
+loopback.mime = express.mime;
+
+loopback.registry = new Registry();
+
+Object.defineProperties(loopback, {
+  Model: {
+    get: function() { return this.registry.getModel('Model'); }
+  },
+  PersistedModel: {
+    get: function() { return this.registry.getModel('PersistedModel'); }
+  },
+  defaultDataSources: {
+    get: function() { return this.registry.defaultDataSources; }
+  },
+  modelBuilder: {
+    get: function() { return this.registry.modelBuilder; }
+  }
+});
+
+/*!
+ * Create an loopback application.
+ *
+ * @return {Function}
+ * @api public
+ */
+
+function createApplication(options) {
+  var app = loopbackExpress();
+
+  merge(app, proto);
+
+  app.loopback = loopback;
+
+  // Create a new instance of models registry per each app instance
+  app.models = function() {
+    return proto.models.apply(this, arguments);
+  };
+
+  // Create a new instance of datasources registry per each app instance
+  app.datasources = app.dataSources = {};
+
+  // Create a new instance of connector registry per each app instance
+  app.connectors = {};
+
+  // Register built-in connectors. It's important to keep this code
+  // hand-written, so that all require() calls are static
+  // and thus browserify can process them (include connectors in the bundle)
+  app.connector('memory', loopback.Memory);
+  app.connector('remote', loopback.Remote);
+
+  if (loopback.localRegistry || options && options.localRegistry === true) {
+    // setup the app registry
+    var registry = app.registry = new Registry();
+    if (options && options.loadBuiltinModels === true) {
+      require('./builtin-models')(registry);
+    }
+  } else {
+    app.registry = loopback.registry;
+  }
+
+  return app;
+}
+
+function mixin(source) {
+  for (var key in source) {
+    var desc = Object.getOwnPropertyDescriptor(source, key);
+
+    // Fix for legacy (pre-ES5) browsers like PhantomJS
+    if (!desc) continue;
+
+    Object.defineProperty(loopback, key, desc);
+  }
+}
+
+mixin(require('./runtime'));
+
+/*!
+ * Expose static express methods like `express.errorHandler`.
+ */
+
+mixin(express);
+
+/*!
+ * Expose additional middleware like session as loopback.*
+ * This will keep the loopback API compatible with express 3.x
+ *
+ * ***only in node***
+ */
+
+if (loopback.isServer) {
+  var middlewares = require('./express-middleware');
+  mixin(middlewares);
+}
+
+/*!
+ * Expose additional loopback middleware
+ * for example `loopback.configure` etc.
+ *
+ * ***only in node***
+ */
+
+if (loopback.isServer) {
+  fs
+    .readdirSync(path.join(__dirname, '..', 'server', 'middleware'))
+    .filter(function(file) {
+      return file.match(/\.js$/);
+    })
+    .forEach(function(m) {
+      loopback[m.replace(/\.js$/, '')] = require('../server/middleware/' + m);
+    });
+
+  loopback.urlNotFound = loopback['url-not-found'];
+  delete loopback['url-not-found'];
+
+  loopback.errorHandler = loopback['error-handler'];
+  delete loopback['error-handler'];
+}
+
+/*
+ * Expose path to the default favicon file
+ *
+ * ***only in node***
+ */
+
+if (loopback.isServer) {
+  /*!
+   * Path to a default favicon shipped with LoopBack.
+   *
+   * **Example**
+   *
+   * ```js
+   * app.use(require('serve-favicon')(loopback.faviconFile));
+   * ```
+   */
+  loopback.faviconFile = path.resolve(__dirname, '../favicon.ico');
+}
+
+/**
+ * Add a remote method to a model.
+ * @param {Function} fn
+ * @param {Object} options (optional)
+ */
+
+loopback.remoteMethod = function(fn, options) {
+  fn.shared = true;
+  if (typeof options === 'object') {
+    Object.keys(options).forEach(function(key) {
+      fn[key] = options[key];
+    });
+  }
+  fn.http = fn.http || {verb: 'get'};
+};
+
+/**
+ * Create a template helper.
+ *
+ *     var render = loopback.template('foo.ejs');
+ *     var html = render({foo: 'bar'});
+ *
+ * @param {String} path Path to the template file.
+ * @returns {Function}
+ */
+
+loopback.template = function(file) {
+  var templates = this._templates || (this._templates = {});
+  var str = templates[file] || (templates[file] = fs.readFileSync(file, 'utf8'));
+  return ejs.compile(str, {
+    filename: file
+  });
+};
+
+require('../server/current-context')(loopback);
+
+/**
+ * Create a named vanilla JavaScript class constructor with an attached
+ * set of properties and options.
+ *
+ * This function comes with two variants:
+ *  * `loopback.createModel(name, properties, options)`
+ *  * `loopback.createModel(config)`
+ *
+ * In the second variant, the parameters `name`, `properties` and `options`
+ * are provided in the config object. Any additional config entries are
+ * interpreted as `options`, i.e. the following two configs are identical:
+ *
+ * ```js
+ * { name: 'Customer', base: 'User' }
+ * { name: 'Customer', options: { base: 'User' } }
+ * ```
+ *
+ * **Example**
+ *
+ * Create an `Author` model using the three-parameter variant:
+ *
+ * ```js
+ * loopback.createModel(
+ *   'Author',
+ *   {
+ *     firstName: 'string',
+ *     lastName: 'string'
+ *   },
+ *   {
+ *     relations: {
+ *       books: {
+ *         model: 'Book',
+ *         type: 'hasAndBelongsToMany'
+ *       }
+ *     }
+ *   }
+ * );
+ * ```
+ *
+ * Create the same model using a config object:
+ *
+ * ```js
+ * loopback.createModel({
+ *   name: 'Author',
+ *   properties: {
+ *     firstName: 'string',
+ *     lastName: 'string'
+ *   },
+ *   relations: {
+ *     books: {
+ *       model: 'Book',
+ *       type: 'hasAndBelongsToMany'
+ *     }
+ *   }
+ * });
+ * ```
+ *
+ * @param {String} name Unique name.
+ * @param {Object} properties
+ * @param {Object} options (optional)
+ *
+ * @header loopback.createModel
+ */
+
+loopback.createModel = function(name, properties, options) {
+  return this.registry.createModel.apply(this.registry, arguments);
+};
+
+/**
+ * Alter an existing Model class.
+ * @param {Model} ModelCtor The model constructor to alter.
+ * @options {Object} config Additional configuration to apply
+ * @property {DataSource} dataSource Attach the model to a dataSource.
+ * @property {Object} [relations] Model relations to add/update.
+ *
+ * @header loopback.configureModel(ModelCtor, config)
+ */
+
+loopback.configureModel = function(ModelCtor, config) {
+  return this.registry.configureModel.apply(this.registry, arguments);
+};
+
+/**
+ * Look up a model class by name from all models created by
+ * `loopback.createModel()`
+ * @param {String} modelName The model name
+ * @returns {Model} The model class
+ *
+ * @header loopback.findModel(modelName)
+ */
+loopback.findModel = function(modelName) {
+  return this.registry.findModel.apply(this.registry, arguments);
+};
+
+/**
+ * Look up a model class by name from all models created by
+ * `loopback.createModel()`. Throw an error when no such model exists.
+ *
+ * @param {String} modelName The model name
+ * @returns {Model} The model class
+ *
+ * @header loopback.getModel(modelName)
+ */
+loopback.getModel = function(modelName) {
+  return this.registry.getModel.apply(this.registry, arguments);
+};
+
+/**
+ * Look up a model class by the base model class.
+ * The method can be used by LoopBack
+ * to find configured models in models.json over the base model.
+ * @param {Model} modelType The base model class
+ * @returns {Model} The subclass if found or the base class
+ *
+ * @header loopback.getModelByType(modelType)
+ */
+loopback.getModelByType = function(modelType) {
+  return this.registry.getModelByType.apply(this.registry, arguments);
+};
+
+/**
+ * Create a data source with passing the provided options to the connector.
+ *
+ * @param {String} name Optional name.
+ * @options {Object} options Data Source options
+ * @property {Object} connector LoopBack connector.
+ * @property {*} [*] Other&nbsp;connector properties.
+ *   See the relevant connector documentation.
+ */
+
+loopback.createDataSource = function(name, options) {
+  return this.registry.createDataSource.apply(this.registry, arguments);
+};
+
+/**
+ * Get an in-memory data source. Use one if it already exists.
+ *
+ * @param {String} [name] The name of the data source.
+ * If not provided, the `'default'` is used.
+ */
+
+loopback.memory = function(name) {
+  return this.registry.memory.apply(this.registry, arguments);
+};
+
+/**
+ * Set the default `dataSource` for a given `type`.
+ * @param {String} type The datasource type.
+ * @param {Object|DataSource} dataSource The data source settings or instance
+ * @returns {DataSource} The data source instance.
+ *
+ * @header loopback.setDefaultDataSourceForType(type, dataSource)
+ */
+
+loopback.setDefaultDataSourceForType = function(type, dataSource) {
+  return this.registry.setDefaultDataSourceForType.apply(this.registry, arguments);
+};
+
+/**
+ * Get the default `dataSource` for a given `type`.
+ * @param {String} type The datasource type.
+ * @returns {DataSource} The data source instance
+ */
+
+loopback.getDefaultDataSourceForType = function(type) {
+  return this.registry.getDefaultDataSourceForType.apply(this.registry, arguments);
+};
+
+/**
+ * Attach any model that does not have a dataSource to
+ * the default dataSource for the type the Model requests
+ */
+
+loopback.autoAttach = function() {
+  return this.registry.autoAttach.apply(this.registry, arguments);
+};
+
+loopback.autoAttachModel = function(ModelCtor) {
+  return this.registry.autoAttachModel.apply(this.registry, arguments);
+};
+
+// temporary alias to simplify migration of code based on <=2.0.0-beta3
+// TODO(bajtos) Remove this in v3.0
+Object.defineProperty(loopback, 'DataModel', {
+  get: function() {
+    return this.registry.DataModel;
+  }
+});
+
+/*!
+ * Built in models / services
+ */
+
+require('./builtin-models')(loopback);
+
+loopback.DataSource = juggler.DataSource;
+
+}).call(this,"/..\\node_modules\\loopback\\lib")
+},{"../package.json":564,"../server/current-context":528,"./application":551,"./builtin-models":553,"./express-middleware":557,"./registry":561,"./runtime":562,"./server-app":552,"assert":22,"ejs":426,"express":552,"fs":56,"loopback-datasource-juggler":497,"path":274,"util":396}],559:[function(require,module,exports){
+arguments[4][242][0].apply(exports,arguments)
+},{"assert":22,"dup":242,"loopback-datasource-juggler":497,"strong-remoting":638,"util":396}],560:[function(require,module,exports){
+arguments[4][243][0].apply(exports,arguments)
+},{"./runtime":562,"./utils":563,"_process":279,"assert":22,"async":411,"debug":419,"depd":498,"dup":243,"stream":349}],561:[function(require,module,exports){
+arguments[4][244][0].apply(exports,arguments)
+},{"./model":559,"./persisted-model":560,"assert":22,"debug":419,"dup":244,"loopback-datasource-juggler":497,"util":396}],562:[function(require,module,exports){
+arguments[4][245][0].apply(exports,arguments)
+},{"dup":245}],563:[function(require,module,exports){
+arguments[4][246][0].apply(exports,arguments)
+},{"dup":246}],564:[function(require,module,exports){
+module.exports={
+  "_args": [
+    [
+      "loopback@^2.22.0",
+      "C:\\Users\\woste\\Documents\\code\\GitHub\\loopback-full-stack-tenancy"
+    ]
+  ],
+  "_from": "loopback@>=2.22.0 <3.0.0",
+  "_id": "loopback@2.26.2",
+  "_inCache": true,
+  "_installable": true,
+  "_location": "/loopback",
+  "_nodeVersion": "4.2.3",
+  "_npmUser": {
+    "email": "mbajtoss@gmail.com",
+    "name": "bajtos"
+  },
+  "_npmVersion": "2.14.7",
+  "_phantomChildren": {},
+  "_requested": {
+    "name": "loopback",
+    "raw": "loopback@^2.22.0",
+    "rawSpec": "^2.22.0",
+    "scope": null,
+    "spec": ">=2.22.0 <3.0.0",
+    "type": "range"
+  },
+  "_requiredBy": [
+    "/"
+  ],
+  "_resolved": "https://registry.npmjs.org/loopback/-/loopback-2.26.2.tgz",
+  "_shasum": "9fc08f55a0e8868050698d8891652cf38648cd66",
+  "_shrinkwrap": null,
+  "_spec": "loopback@^2.22.0",
+  "_where": "C:\\Users\\woste\\Documents\\code\\GitHub\\loopback-full-stack-tenancy",
+  "browser": {
+    "./lib/server-app.js": "./lib/browser-express.js",
+    "./server/current-context.js": "./browser/current-context.js",
+    "bcrypt": false,
+    "connect": false,
+    "depd": "loopback-datasource-juggler/lib/browser.depd.js",
+    "express": "./lib/browser-express.js",
+    "nodemailer": false,
+    "supertest": false
+  },
+  "bugs": {
+    "url": "https://github.com/strongloop/loopback/issues"
+  },
+  "dependencies": {
+    "async": "^0.9.0",
+    "bcryptjs": "^2.1.0",
+    "body-parser": "^1.12.0",
+    "canonical-json": "0.0.4",
+    "continuation-local-storage": "^3.1.3",
+    "cookie-parser": "^1.3.4",
+    "debug": "^2.1.2",
+    "depd": "^1.0.0",
+    "ejs": "^2.3.1",
+    "errorhandler": "^1.3.4",
+    "express": "^4.12.2",
+    "inflection": "^1.6.0",
+    "loopback-connector-remote": "^1.0.3",
+    "loopback-phase": "^1.2.0",
+    "nodemailer": "^1.3.1",
+    "nodemailer-stub-transport": "^0.1.5",
+    "serve-favicon": "^2.2.0",
+    "sl-blip": "http://blip.strongloop.com/loopback@2.26.2",
+    "stable": "^0.1.5",
+    "strong-remoting": "^2.21.0",
+    "uid2": "0.0.3",
+    "underscore.string": "^3.0.3"
+  },
+  "description": "LoopBack: Open Source Framework for Node.js",
+  "devDependencies": {
+    "bluebird": "^2.9.9",
+    "browserify": "^10.0.0",
+    "chai": "^2.1.1",
+    "es5-shim": "^4.1.0",
+    "grunt": "^0.4.5",
+    "grunt-browserify": "^3.5.0",
+    "grunt-cli": "^0.1.13",
+    "grunt-contrib-jshint": "^0.11.0",
+    "grunt-contrib-uglify": "^0.9.1",
+    "grunt-contrib-watch": "^0.6.1",
+    "grunt-jscs": "^1.5.0",
+    "grunt-karma": "^0.10.1",
+    "grunt-mocha-test": "^0.12.7",
+    "karma": "^0.12.31",
+    "karma-browserify": "^4.0.0",
+    "karma-chrome-launcher": "^0.1.7",
+    "karma-firefox-launcher": "^0.1.4",
+    "karma-html2js-preprocessor": "^0.1.0",
+    "karma-junit-reporter": "^0.2.2",
+    "karma-mocha": "^0.1.10",
+    "karma-phantomjs-launcher": "^0.1.4",
+    "karma-script-launcher": "^0.1.0",
+    "loopback-boot": "^2.7.0",
+    "loopback-datasource-juggler": "^2.19.1",
+    "loopback-testing": "~1.1.0",
+    "mocha": "^2.1.0",
+    "sinon": "^1.13.0",
+    "strong-task-emitter": "^0.0.6",
+    "supertest": "^0.15.0"
+  },
+  "directories": {},
+  "dist": {
+    "shasum": "9fc08f55a0e8868050698d8891652cf38648cd66",
+    "tarball": "http://registry.npmjs.org/loopback/-/loopback-2.26.2.tgz"
+  },
+  "gitHead": "122c1186ba96c502f9e34f1a372feda0ce2048a2",
+  "homepage": "http://loopback.io",
+  "keywords": [
+    "StrongLoop",
+    "api",
+    "auth",
+    "express",
+    "framework",
+    "koa",
+    "mBaaS",
+    "mobile",
+    "mongo",
+    "mongodb",
+    "mssql",
+    "mysql",
+    "nosql",
+    "oracle",
+    "postgres",
+    "postgresql",
+    "rest",
+    "restful",
+    "restify",
+    "security",
+    "soap",
+    "sqlserver",
+    "web"
+  ],
+  "license": "MIT",
+  "maintainers": [
+    {
+      "name": "rfeng",
+      "email": "enjoyjava@gmail.com"
+    },
+    {
+      "name": "ritch",
+      "email": "skawful@gmail.com"
+    },
+    {
+      "name": "strongloop",
+      "email": "callback@strongloop.com"
+    },
+    {
+      "name": "bajtos",
+      "email": "miro.bajtos@gmail.com"
+    },
+    {
+      "name": "altsang",
+      "email": "al@strongloop.com"
+    }
+  ],
+  "name": "loopback",
+  "optionalDependencies": {
+    "sl-blip": "http://blip.strongloop.com/loopback@2.26.2"
+  },
+  "peerDependencies": {
+    "loopback-datasource-juggler": "^2.19.0"
+  },
+  "readme": "ERROR: No README data found!",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strongloop/loopback.git"
+  },
+  "scripts": {
+    "test": "grunt mocha-and-karma"
+  },
+  "version": "2.26.2"
+}
+
+},{}],565:[function(require,module,exports){
+arguments[4][249][0].apply(exports,arguments)
+},{"dup":249}],566:[function(require,module,exports){
+arguments[4][250][0].apply(exports,arguments)
+},{"./db.json":565,"dup":250}],567:[function(require,module,exports){
+arguments[4][251][0].apply(exports,arguments)
+},{"dup":251,"mime-db":566,"path":274}],568:[function(require,module,exports){
+arguments[4][253][0].apply(exports,arguments)
+},{"dup":253}],569:[function(require,module,exports){
 module.exports = require("./lib/main")
-},{"./lib/main":488}],485:[function(require,module,exports){
+},{"./lib/main":573}],570:[function(require,module,exports){
 // Generated by CoffeeScript 1.10.0
 (function() {
   var IGNORE_KEYS, parseConnectionString, parseConnectionURI, qs, resolveConnectionString, url,
@@ -102365,7 +107704,7 @@ module.exports = require("./lib/main")
 
 }).call(this);
 
-},{"querystring":293,"url":392}],486:[function(require,module,exports){
+},{"querystring":293,"url":392}],571:[function(require,module,exports){
 (function (Buffer){
 // Generated by CoffeeScript 1.10.0
 (function() {
@@ -102647,8 +107986,8 @@ module.exports = require("./lib/main")
 
 }).call(this);
 
-}).call(this,{"isBuffer":require("../../../../../client/node_modules/is-buffer/index.js")})
-},{"../../../../../client/node_modules/is-buffer/index.js":155}],487:[function(require,module,exports){
+}).call(this,{"isBuffer":require("../../../client/node_modules/is-buffer/index.js")})
+},{"../../../client/node_modules/is-buffer/index.js":155}],572:[function(require,module,exports){
 // Generated by CoffeeScript 1.10.0
 (function() {
   module.exports = {
@@ -102661,7 +108000,7 @@ module.exports = require("./lib/main")
 
 }).call(this);
 
-},{}],488:[function(require,module,exports){
+},{}],573:[function(require,module,exports){
 (function (process,global,Buffer){
 // Generated by CoffeeScript 1.10.0
 (function() {
@@ -104536,7 +109875,7 @@ module.exports = require("./lib/main")
 }).call(this);
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./connectionstring":485,"./datatypes":486,"./isolationlevel":487,"./table":489,"_process":279,"buffer":58,"events":111,"fs":56,"promise":490,"util":396}],489:[function(require,module,exports){
+},{"./connectionstring":570,"./datatypes":571,"./isolationlevel":572,"./table":574,"_process":279,"buffer":58,"events":111,"fs":56,"promise":583,"util":396}],574:[function(require,module,exports){
 // Generated by CoffeeScript 1.10.0
 (function() {
   var JSON_COLUMN_ID, MAX, TYPES, Table, declare, ref,
@@ -104714,12 +110053,28 @@ module.exports = require("./lib/main")
 
 }).call(this);
 
-},{"./datatypes":486}],490:[function(require,module,exports){
+},{"./datatypes":571}],575:[function(require,module,exports){
+arguments[4][254][0].apply(exports,arguments)
+},{"./inject":576,"dup":254,"stream-serializer":633}],576:[function(require,module,exports){
+arguments[4][255][0].apply(exports,arguments)
+},{"dup":255,"duplex":422,"through":658,"xtend":681}],577:[function(require,module,exports){
+arguments[4][256][0].apply(exports,arguments)
+},{"buffer":58,"crypto":72,"dup":256}],578:[function(require,module,exports){
+arguments[4][257][0].apply(exports,arguments)
+},{"crypto":72,"dup":257,"querystring":293}],579:[function(require,module,exports){
+arguments[4][258][0].apply(exports,arguments)
+},{"dup":258,"fs":56}],580:[function(require,module,exports){
+arguments[4][276][0].apply(exports,arguments)
+},{"dup":276,"pinkie":581}],581:[function(require,module,exports){
+arguments[4][277][0].apply(exports,arguments)
+},{"_process":279,"dup":277}],582:[function(require,module,exports){
+arguments[4][278][0].apply(exports,arguments)
+},{"_process":279,"dup":278}],583:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./lib')
 
-},{"./lib":495}],491:[function(require,module,exports){
+},{"./lib":588}],584:[function(require,module,exports){
 'use strict';
 
 var asap = require('asap/raw');
@@ -104934,7 +110289,7 @@ function doResolve(fn, promise) {
   }
 }
 
-},{"asap/raw":499}],492:[function(require,module,exports){
+},{"asap/raw":403}],585:[function(require,module,exports){
 'use strict';
 
 var Promise = require('./core.js');
@@ -104949,7 +110304,7 @@ Promise.prototype.done = function (onFulfilled, onRejected) {
   });
 };
 
-},{"./core.js":491}],493:[function(require,module,exports){
+},{"./core.js":584}],586:[function(require,module,exports){
 'use strict';
 
 //This file contains the ES6 extensions to the core Promises/A+ API
@@ -105058,7 +110413,7 @@ Promise.prototype['catch'] = function (onRejected) {
   return this.then(null, onRejected);
 };
 
-},{"./core.js":491}],494:[function(require,module,exports){
+},{"./core.js":584}],587:[function(require,module,exports){
 'use strict';
 
 var Promise = require('./core.js');
@@ -105076,7 +110431,7 @@ Promise.prototype['finally'] = function (f) {
   });
 };
 
-},{"./core.js":491}],495:[function(require,module,exports){
+},{"./core.js":584}],588:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./core.js');
@@ -105086,7 +110441,7 @@ require('./es6-extensions.js');
 require('./node-extensions.js');
 require('./synchronous.js');
 
-},{"./core.js":491,"./done.js":492,"./es6-extensions.js":493,"./finally.js":494,"./node-extensions.js":496,"./synchronous.js":497}],496:[function(require,module,exports){
+},{"./core.js":584,"./done.js":585,"./es6-extensions.js":586,"./finally.js":587,"./node-extensions.js":589,"./synchronous.js":590}],589:[function(require,module,exports){
 'use strict';
 
 // This file contains then/promise specific extensions that are only useful
@@ -105218,7 +110573,7 @@ Promise.prototype.nodeify = function (callback, ctx) {
   });
 }
 
-},{"./core.js":491,"asap":498}],497:[function(require,module,exports){
+},{"./core.js":584,"asap":402}],590:[function(require,module,exports){
 'use strict';
 
 var Promise = require('./core.js');
@@ -105282,5881 +110637,455 @@ Promise.disableSynchronous = function() {
   Promise.prototype.getState = undefined;
 };
 
-},{"./core.js":491}],498:[function(require,module,exports){
-"use strict";
-
-// rawAsap provides everything we need except exception management.
-var rawAsap = require("./raw");
-// RawTasks are recycled to reduce GC churn.
-var freeTasks = [];
-// We queue errors to ensure they are thrown in right order (FIFO).
-// Array-as-queue is good enough here, since we are just dealing with exceptions.
-var pendingErrors = [];
-var requestErrorThrow = rawAsap.makeRequestCallFromTimer(throwFirstError);
-
-function throwFirstError() {
-    if (pendingErrors.length) {
-        throw pendingErrors.shift();
-    }
-}
-
-/**
- * Calls a task as soon as possible after returning, in its own event, with priority
- * over other events like animation, reflow, and repaint. An error thrown from an
- * event will not interrupt, nor even substantially slow down the processing of
- * other events, but will be rather postponed to a lower priority event.
- * @param {{call}} task A callable object, typically a function that takes no
- * arguments.
- */
-module.exports = asap;
-function asap(task) {
-    var rawTask;
-    if (freeTasks.length) {
-        rawTask = freeTasks.pop();
-    } else {
-        rawTask = new RawTask();
-    }
-    rawTask.task = task;
-    rawAsap(rawTask);
-}
-
-// We wrap tasks with recyclable task objects.  A task object implements
-// `call`, just like a function.
-function RawTask() {
-    this.task = null;
-}
-
-// The sole purpose of wrapping the task is to catch the exception and recycle
-// the task object after its single use.
-RawTask.prototype.call = function () {
-    try {
-        this.task.call();
-    } catch (error) {
-        if (asap.onerror) {
-            // This hook exists purely for testing purposes.
-            // Its name will be periodically randomized to break any code that
-            // depends on its existence.
-            asap.onerror(error);
-        } else {
-            // In a web browser, exceptions are not fatal. However, to avoid
-            // slowing down the queue of pending tasks, we rethrow the error in a
-            // lower priority turn.
-            pendingErrors.push(error);
-            requestErrorThrow();
-        }
-    } finally {
-        this.task = null;
-        freeTasks[freeTasks.length] = this;
-    }
-};
-
-},{"./raw":499}],499:[function(require,module,exports){
-(function (global){
-"use strict";
-
-// Use the fastest means possible to execute a task in its own turn, with
-// priority over other events including IO, animation, reflow, and redraw
-// events in browsers.
-//
-// An exception thrown by a task will permanently interrupt the processing of
-// subsequent tasks. The higher level `asap` function ensures that if an
-// exception is thrown by a task, that the task queue will continue flushing as
-// soon as possible, but if you use `rawAsap` directly, you are responsible to
-// either ensure that no exceptions are thrown from your task, or to manually
-// call `rawAsap.requestFlush` if an exception is thrown.
-module.exports = rawAsap;
-function rawAsap(task) {
-    if (!queue.length) {
-        requestFlush();
-        flushing = true;
-    }
-    // Equivalent to push, but avoids a function call.
-    queue[queue.length] = task;
-}
-
-var queue = [];
-// Once a flush has been requested, no further calls to `requestFlush` are
-// necessary until the next `flush` completes.
-var flushing = false;
-// `requestFlush` is an implementation-specific method that attempts to kick
-// off a `flush` event as quickly as possible. `flush` will attempt to exhaust
-// the event queue before yielding to the browser's own event loop.
-var requestFlush;
-// The position of the next task to execute in the task queue. This is
-// preserved between calls to `flush` so that it can be resumed if
-// a task throws an exception.
-var index = 0;
-// If a task schedules additional tasks recursively, the task queue can grow
-// unbounded. To prevent memory exhaustion, the task queue will periodically
-// truncate already-completed tasks.
-var capacity = 1024;
-
-// The flush function processes all tasks that have been scheduled with
-// `rawAsap` unless and until one of those tasks throws an exception.
-// If a task throws an exception, `flush` ensures that its state will remain
-// consistent and will resume where it left off when called again.
-// However, `flush` does not make any arrangements to be called again if an
-// exception is thrown.
-function flush() {
-    while (index < queue.length) {
-        var currentIndex = index;
-        // Advance the index before calling the task. This ensures that we will
-        // begin flushing on the next task the task throws an error.
-        index = index + 1;
-        queue[currentIndex].call();
-        // Prevent leaking memory for long chains of recursive calls to `asap`.
-        // If we call `asap` within tasks scheduled by `asap`, the queue will
-        // grow, but to avoid an O(n) walk for every task we execute, we don't
-        // shift tasks off the queue after they have been executed.
-        // Instead, we periodically shift 1024 tasks off the queue.
-        if (index > capacity) {
-            // Manually shift all values starting at the index back to the
-            // beginning of the queue.
-            for (var scan = 0, newLength = queue.length - index; scan < newLength; scan++) {
-                queue[scan] = queue[scan + index];
-            }
-            queue.length -= index;
-            index = 0;
-        }
-    }
-    queue.length = 0;
-    index = 0;
-    flushing = false;
-}
-
-// `requestFlush` is implemented using a strategy based on data collected from
-// every available SauceLabs Selenium web driver worker at time of writing.
-// https://docs.google.com/spreadsheets/d/1mG-5UYGup5qxGdEMWkhP6BWCz053NUb2E1QoUTU16uA/edit#gid=783724593
-
-// Safari 6 and 6.1 for desktop, iPad, and iPhone are the only browsers that
-// have WebKitMutationObserver but not un-prefixed MutationObserver.
-// Must use `global` instead of `window` to work in both frames and web
-// workers. `global` is a provision of Browserify, Mr, Mrs, or Mop.
-var BrowserMutationObserver = global.MutationObserver || global.WebKitMutationObserver;
-
-// MutationObservers are desirable because they have high priority and work
-// reliably everywhere they are implemented.
-// They are implemented in all modern browsers.
-//
-// - Android 4-4.3
-// - Chrome 26-34
-// - Firefox 14-29
-// - Internet Explorer 11
-// - iPad Safari 6-7.1
-// - iPhone Safari 7-7.1
-// - Safari 6-7
-if (typeof BrowserMutationObserver === "function") {
-    requestFlush = makeRequestCallFromMutationObserver(flush);
-
-// MessageChannels are desirable because they give direct access to the HTML
-// task queue, are implemented in Internet Explorer 10, Safari 5.0-1, and Opera
-// 11-12, and in web workers in many engines.
-// Although message channels yield to any queued rendering and IO tasks, they
-// would be better than imposing the 4ms delay of timers.
-// However, they do not work reliably in Internet Explorer or Safari.
-
-// Internet Explorer 10 is the only browser that has setImmediate but does
-// not have MutationObservers.
-// Although setImmediate yields to the browser's renderer, it would be
-// preferrable to falling back to setTimeout since it does not have
-// the minimum 4ms penalty.
-// Unfortunately there appears to be a bug in Internet Explorer 10 Mobile (and
-// Desktop to a lesser extent) that renders both setImmediate and
-// MessageChannel useless for the purposes of ASAP.
-// https://github.com/kriskowal/q/issues/396
-
-// Timers are implemented universally.
-// We fall back to timers in workers in most engines, and in foreground
-// contexts in the following browsers.
-// However, note that even this simple case requires nuances to operate in a
-// broad spectrum of browsers.
-//
-// - Firefox 3-13
-// - Internet Explorer 6-9
-// - iPad Safari 4.3
-// - Lynx 2.8.7
-} else {
-    requestFlush = makeRequestCallFromTimer(flush);
-}
-
-// `requestFlush` requests that the high priority event queue be flushed as
-// soon as possible.
-// This is useful to prevent an error thrown in a task from stalling the event
-// queue if the exception handled by Node.js’s
-// `process.on("uncaughtException")` or by a domain.
-rawAsap.requestFlush = requestFlush;
-
-// To request a high priority event, we induce a mutation observer by toggling
-// the text of a text node between "1" and "-1".
-function makeRequestCallFromMutationObserver(callback) {
-    var toggle = 1;
-    var observer = new BrowserMutationObserver(callback);
-    var node = document.createTextNode("");
-    observer.observe(node, {characterData: true});
-    return function requestCall() {
-        toggle = -toggle;
-        node.data = toggle;
-    };
-}
-
-// The message channel technique was discovered by Malte Ubl and was the
-// original foundation for this library.
-// http://www.nonblocking.io/2011/06/windownexttick.html
-
-// Safari 6.0.5 (at least) intermittently fails to create message ports on a
-// page's first load. Thankfully, this version of Safari supports
-// MutationObservers, so we don't need to fall back in that case.
-
-// function makeRequestCallFromMessageChannel(callback) {
-//     var channel = new MessageChannel();
-//     channel.port1.onmessage = callback;
-//     return function requestCall() {
-//         channel.port2.postMessage(0);
-//     };
-// }
-
-// For reasons explained above, we are also unable to use `setImmediate`
-// under any circumstances.
-// Even if we were, there is another bug in Internet Explorer 10.
-// It is not sufficient to assign `setImmediate` to `requestFlush` because
-// `setImmediate` must be called *by name* and therefore must be wrapped in a
-// closure.
-// Never forget.
-
-// function makeRequestCallFromSetImmediate(callback) {
-//     return function requestCall() {
-//         setImmediate(callback);
-//     };
-// }
-
-// Safari 6.0 has a problem where timers will get lost while the user is
-// scrolling. This problem does not impact ASAP because Safari 6.0 supports
-// mutation observers, so that implementation is used instead.
-// However, if we ever elect to use timers in Safari, the prevalent work-around
-// is to add a scroll event listener that calls for a flush.
-
-// `setTimeout` does not call the passed callback if the delay is less than
-// approximately 7 in web workers in Firefox 8 through 18, and sometimes not
-// even then.
-
-function makeRequestCallFromTimer(callback) {
-    return function requestCall() {
-        // We dispatch a timeout with a specified delay of 0 for engines that
-        // can reliably accommodate that request. This will usually be snapped
-        // to a 4 milisecond delay, but once we're flushing, there's no delay
-        // between events.
-        var timeoutHandle = setTimeout(handleTimer, 0);
-        // However, since this timer gets frequently dropped in Firefox
-        // workers, we enlist an interval handle that will try to fire
-        // an event 20 times per second until it succeeds.
-        var intervalHandle = setInterval(handleTimer, 50);
-
-        function handleTimer() {
-            // Whichever timer succeeds will cancel both timers and
-            // execute the callback.
-            clearTimeout(timeoutHandle);
-            clearInterval(intervalHandle);
-            callback();
-        }
-    };
-}
-
-// This is for `asap.js` only.
-// Its name will be periodically randomized to break any code that depends on
-// its existence.
-rawAsap.makeRequestCallFromTimer = makeRequestCallFromTimer;
-
-// ASAP was originally a nextTick shim included in Q. This was factored out
-// into this ASAP package. It was later adapted to RSVP which made further
-// amendments. These decisions, particularly to marginalize MessageChannel and
-// to capture the MutationObserver implementation in a closure, were integrated
-// back into ASAP proper.
-// https://github.com/tildeio/rsvp.js/blob/cddf7232546a9cf858524b75cde6f9edf72620a7/lib/rsvp/asap.js
-
-}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],500:[function(require,module,exports){
-var fromEnv = require('./lib/env');
-var fromFile = require('./lib/file');
-var LicenseList = require('./lib/license-list');
-var handlers = require('./lib/handlers');
-var home = require('user-home');
-var path = require('path');
-var appRoot = require('./lib/approot');
-var debug = require('debug')('strongloop-license');
-
-var licEnvVar = 'STRONGLOOP_LICENSE';
-var licFile = path.resolve(home || '',
-                           path.join('.strongloop', 'licenses.json'));
-
-var mainModule = appRoot(require.main);
-var appLicFile = path.join(mainModule.dir, 'licenses.json');
-debug('Application license file: %s', appLicFile);
-
-module.exports = exports = validate;
-exports.CONSOLE = handlers.CONSOLE;
-exports.EXIT = handlers.EXIT;
-exports.NOOP = handlers.NOOP;
-
-var loaders = [
-  function pkgLicenses() {
-    // Read licenses from STRONGLOOP_LICENSE property of package.json
-    var config = mainModule.package.config || {};
-    var licStr = (config.strongloop && config.strongloop.license) ||
-      config.strongLoopLicense ||
-      config.StrongLoopLicense || config.STRONGLOOP_LICENSE || '';
-    var parts = licStr.split(':');
-    var lics = parts.filter(Boolean);
-    debug('loaded %d licenses from package.json %s', lics.length, licStr);
-    return lics;
-  },
-  function appLicenses() {
-    return fromFile(appLicFile);
-  },
-  function envLicenses() {
-    return fromEnv(licEnvVar);
-  },
-  function fileLicenses() {
-    return fromFile(licFile);
-  },
-];
-
-function validate(opts, callback) {
-  opts = defaults(opts);
-  var result = false;
-  var licenses = new LicenseList(loaders);
-  result = licenses.first(opts.product, opts.feature, opts.now);
-  if (result) {
-    result.details.key = result.key;
-    result = result.details;
-  }
-  setImmediate(makeHandler(callback), null, opts.label, result);
-  return result;
-}
-
-function defaults(opts) {
-  if (typeof opts === 'string') {
-    // match "product[:feature[=label]]"
-    var parts = /^([^:=]+)(?::([^:=]+))?(?:=(.+))?$/.exec(opts);
-    opts = {
-      product: parts && parts[1],
-      feature: parts && parts[2],
-      label: parts && parts[3],
-    };
-  }
-  var defaultLabel = opts.feature ? [opts.product, opts.feature].join(':')
-                                  : opts.product;
-  return {
-    product: opts.product,
-    feature: opts.feature,
-    label: opts.label || defaultLabel,
-    now: opts.now || new Date(),
-    interval: opts.interval,
-  };
-}
-
-function makeHandler(fnOrName) {
-  if (typeof fnOrName === 'string') {
-    fnOrName = handlers[fnOrName.toUpperCase()];
-  }
-  if (typeof fnOrName !== 'function') {
-    fnOrName = handlers.CONSOLE;
-  }
-  return fnOrName;
-}
-
-},{"./lib/approot":501,"./lib/env":502,"./lib/file":503,"./lib/handlers":504,"./lib/license-list":505,"debug":417,"path":274,"user-home":510}],501:[function(require,module,exports){
-var fs = require('fs');
-var path = require('path');
-
-function find(pmodule, dir) {
-  if (!dir) {
-    dir = path.dirname(pmodule.filename);
-  }
-
-  var pkgFile = path.join(dir, 'package.json');
-
-  try {
-    var stats = fs.statSync(pkgFile);
-
-    if (stats.isFile()) {
-      return pkgFile;
-    }
-  } catch (err) {
-    // Ignore the err
-  }
-
-  if (dir === '/') {
-    throw new Error('Could not find package.json up from: ' + dir);
-  } else if (!dir || dir === '.') {
-    throw new Error('Cannot find package.json from unspecified directory');
-  }
-
-  return find(pmodule, path.dirname(dir));
-}
-
-function readRootPackage(pmodule) {
-  var pkg = find(pmodule);
-
-  var data = fs.readFileSync(pkg).toString();
-
-  return {
-    dir: path.dirname(pkg),
-    package: JSON.parse(data)
-  };
-}
-
-module.exports = readRootPackage;
-
-},{"fs":56,"path":274}],502:[function(require,module,exports){
-(function (process){
-var debug = require('debug')('strongloop-license:env');
-module.exports = envLicenses;
-
-// Read from named environment variable a list of ':' separated licenses:
-// "lic1:lic2:lic3"
-
-function envLicenses(envVar) {
-  var envStr = process.env[envVar] || '';
-  var parts = envStr.split(':');
-  var lics = parts.filter(blank);
-  debug('loaded %d licenses from env var %s', lics.length, envVar);
-  return lics;
-
-  function blank(str) {
-    return !!str;
-  }
-}
-
-}).call(this,require('_process'))
-},{"_process":279,"debug":417}],503:[function(require,module,exports){
-var debug = require('debug')('strongloop-license:file');
-var fs = require('fs');
-
-module.exports = fileLicenses;
-
-// path of JSON file containing:
-// [ { licenseKey: 'lic', ...}, ... ]
-
-function fileLicenses(path) {
-  var lics = safeChain(path, fs.readFileSync, JSON.parse, extractLics);
-  lics = lics || [];
-  debug('loaded %d licenses from %s', lics.length, path);
-  return lics;
-
-  function extractLics(subs) {
-    var licenses = subs.licenses || subs;
-    if (!Array.isArray(licenses)) {
-      throw new Error('Invalid licenses: ' + subs);
-    }
-    return licenses.map(function(sub) {
-      return sub.licenseKey;
-    }).filter(blank);
-  }
-
-  function blank(str) {
-    return !!str;
-  }
-}
-
-function safeChain(init, fns) {
-  fns = [].slice.call(arguments, 1);
-  return fns.reduce(attempt, init);
-
-  function attempt(prev, fn) {
-    try {
-      return fn(prev);
-    } catch (e) {
-      return null;
-    }
-  }
-}
-
-},{"debug":417,"fs":56}],504:[function(require,module,exports){
-(function (process){
-exports.CONSOLE = logIfFailure;
-exports.EXIT = exitIfFailure;
-exports.NOOP = noop;
-
-// Handlers are given:
-//  err: null or Error
-//  req: "product:feature" or "product" used in license requirement
-//  res: true if any license met the requirements
-
-function noop() {}
-
-function exitIfFailure(err, req, res) {
-  logIfFailure(err, req, res);
-  if (err || !res) {
-    console.error('##  Terminating process.');
-    // Delay actual exit in case stderr is non-blocking
-    setTimeout(exit, 50);
-    function exit() {
-      process.exit(1);
-    }
-  }
-}
-
-function logIfFailure(err, req, res) {
-  if (err || !res) {
-    console.error('## %s licensing missing or invalid. Please verify your ' +
-                  'licenses in the Licenses page by running StrongLoop Arc ' +
-                  'by typing "slc arc --licenses" . If you have questions ' +
-                  'about your license or StrongLoop licensing please ' +
-                  'contact sales@strongloop.com.', req);
-  } else {
-    console.log('## %s is licensed from %s to %s.', req,
-                res.activationDate.toISOString(),
-                res.expirationDate.toISOString());
-  }
-}
-
-}).call(this,require('_process'))
-},{"_process":279}],505:[function(require,module,exports){
-var License = require('strong-license');
-var debug = require('debug')('strongloop-license:list');
-
-module.exports = exports = LicenseList;
-
-// Simple wrapper for loading a list of licenses and performing checks on them
-
-function LicenseList(loaders) {
-  if (!(this instanceof LicenseList)) {
-    return new LicenseList(loaders);
-  }
-  this.loaders = [].concat(loaders || []);
-  this.licenses = [];
-  this.reload();
-}
-
-LicenseList.prototype.add = function add(lic) {
-  var decodedLicense = new License(lic, 'c374fa24098c7eb64a73dc05c428be40');
-  debug('loaded license %j', decodedLicense);
-  this.licenses.push(decodedLicense);
-};
-
-LicenseList.prototype.any = function any(product, feature, now) {
-  debug('validating license for %s:%s@%j', product, feature, now);
-  var result = this.licenses.some(covers);
-  debug('result: %j', result);
-  return result;
-
-  function covers(lic) {
-    debug('testing against %j', lic);
-    return lic.covers(product, feature, now);
-  }
-};
-
-LicenseList.prototype.first = function any(product, feature, now) {
-  debug('validating license for %s:%s@%j', product, feature, now);
-  var result = this.licenses.reduce(covers, false);
-  debug('result: %j', result);
-  return result;
-
-  function covers(match, lic) {
-    if (match) {
-      return match;
-    } else {
-      debug('testing against %j', lic);
-      return lic.covers(product, feature, now) && lic;
-    }
-  }
-};
-
-LicenseList.prototype.reload = function reload() {
-  var self = this;
-  debug('reloading licenses');
-  this.loaders.forEach(function(loader) {
-    loader().forEach(self.add, self);
-  });
-};
-
-},{"debug":417,"strong-license":506}],506:[function(require,module,exports){
-(function (process){
-var License = require('./lib/license');
-
-// TODO: remove top level exports in 2.x
-module.exports = License;
-module.exports.License = License;
-
-// If run directly, parse each argument as a license and dump its contents
-if (module === require.main) {
-  process.argv.slice(2).forEach(function(k) {
-    console.log('%j', new License(k));
-  });
-}
-
-}).call(this,require('_process'))
-},{"./lib/license":507,"_process":279}],507:[function(require,module,exports){
-(function (process){
-var fmt = require('util').format;
-var jwt = require('jwt-simple');
-
-module.exports = License;
-
-License.defaultSecret = 'strong-license';
-License.defaultAlgorithm = 'HS256';
-
-/**
- * License extends the JWT (JSON Web Token) format by adding additional fields,
- * defining a wildcard semantic for some fields, defining semantics for
- * validation against a query.
- * @class
- * @param {(string|Object)} input Encoded license string or license description object
- * @param {string} [secret] Secret to use for encoding/decoding the license
- * @param {string} [algorithm] Algorithm to encode/decode with
- */
-function License(input, secret, algorithm) {
-  if (!(this instanceof License))
-    return new License(key);
-
-  secret = secret || License.defaultSecret;
-  algorithm = algorithm || License.defaultAlgorithm;
-
-  if (typeof input === 'string' || input instanceof String) {
-    this.key = input;
-    this.details = normalized(safeDecode(input, secret));
-  } else {
-    input = input || {};
-    this.details = normalized(input);
-    this.key = jwt.encode(this.details, secret, algorithm);
-  }
-}
-
-License.prototype.export = function LicenseExport(secret, algorithm) {
-  secret = secret || License.defaultSecret;
-  algorithm = algorithm || License.defaultAlgorithm;
-  return jwt.encode(this.details, secret, algorithm);
-};
-
-/**
- * @returns {Object} decoded object to stringify when serializing to JSON
- */
-License.prototype.toJSON = function LicenseToJSON() {
-  return this.details;
-};
-
-/**
- * @returns {string} decoded single-line string representation of a License
- */
-License.prototype.toString = function LicenseToString() {
-  var lic = this.details;
-  return fmt('License(email: %s, prod: %s, feat: %s, start: %s, end: %s)',
-             lic.email, lic.product, lic.features.join(','),
-             lic.activationDate, lic.expirationDate);
-};
-
-/**
- * Licenses define a combination of product and features and the period of
- * time that the product and features are licensed for.
- * Parameters that are not given (or are otherwise falsey) do not have
- * requirements, so they always pass. If no arguments are given, then all
- * of the requirements are met and the scenario is considered "covered".
- * @param {string} [product] Product string to query license for
- * @param {string} [features] Feature string to query license for
- * @param {Date} [when] Point in time to test license against
- * @returns {Boolean} Whether the license covers the specified product,
- *                    feature, and time.
- */
-License.prototype.covers = function LicenseCovers(product, feature, when) {
-  return (this.coversProduct(product)
-          && this.coversFeature(feature)
-          && this.coversDate(when));
-};
-
-/**
- * @param {string} [query] product string to test for
- * @returns {Boolean} true if query is falsey, identical to the product string
- *                    in the license, or if the product in the license is '*'.
- */
-License.prototype.coversProduct = function LicenseCoversProduct(query) {
-  return match(this.details.product, query);
-};
-
-/**
- * @param {string} [query] feature string to test for
- * @returns {Boolean} true if query is falsey, identical any string in the
- *                    license's feature list, or if the license's feature list
- *                    contains a '*'.
- */
-License.prototype.coversFeature = function LicenseCoversFeature(query) {
-  return !query || this.details.features.some(function(enabled) {
-    return match(enabled, query);
-  });
-};
-
-/**
- * @param {Date} [when] point in time to test activation/expiration against
- * @returns {Boolean} true if when is falsey, or if it is between the
- *                    activationDate and expirationDate in the license.
- */
-License.prototype.coversDate = function LicenseCoversDate(when) {
-  var lic = this.details;
-  return !when || (lic.activationDate < when && lic.expirationDate > when);
-};
-
-// 'foo' matches 'foo'
-// * matches anything
-// falsey query is matched by anything
-function match(pattern, query) {
-  var result = !query || pattern === '*' || pattern === query;
-  return result;
-}
-
-// Normalize input fields, defaulting to "invalid" or "expired" state where
-// details are missing.
-function normalized(input) {
-  var l = JSON.parse(JSON.stringify(input));
-  l.userId = l.userId || null;
-  l.email = l.email || null;
-  l.product = l.product || null;
-  if (l.product !== null) {
-    l.product = String(l.product);
-  }
-  l.features = l.features || [];
-  if (typeof l.features === 'string') {
-    // split on , and :
-    l.features = l.features.split(/(?:,|:)/);
-  } else if (!Array.isArray(l.features)) {
-    l.features = [];
-  }
-  if (l.feature) {
-    l.features.push(l.feature)
-  }
-  l.features = l.features.map(function(f) {
-    return f.trim();
-  }).filter(function(f) {
-    return !!f;
-  });
-  l.activationDate = new Date(l.activationDate || 0);
-  l.expirationDate = new Date(l.expirationDate || 0);
-  return l;
-}
-
-function safeDecode(input, secret, algorithm) {
-  try {
-    return normalized(jwt.decode(input, secret, algorithm));
-  } catch (e) {
-    return normalized({});
-  }
-}
-
-// If run directly, parse each argument as a license and dump its contents
-if (module === require.main) {
-  process.argv.slice(2).forEach(function(k) {
-    console.log('%j', new License(k));
-  });
-}
-
-}).call(this,require('_process'))
-},{"_process":279,"jwt-simple":508,"util":396}],508:[function(require,module,exports){
-module.exports = require('./lib/jwt');
-
-},{"./lib/jwt":509}],509:[function(require,module,exports){
+},{"./core.js":584}],591:[function(require,module,exports){
+arguments[4][211][0].apply(exports,arguments)
+},{"./parse":592,"./stringify":593,"dup":211}],592:[function(require,module,exports){
+arguments[4][288][0].apply(exports,arguments)
+},{"./utils":594,"dup":288}],593:[function(require,module,exports){
+arguments[4][289][0].apply(exports,arguments)
+},{"./utils":594,"dup":289}],594:[function(require,module,exports){
+arguments[4][290][0].apply(exports,arguments)
+},{"dup":290}],595:[function(require,module,exports){
+arguments[4][295][0].apply(exports,arguments)
+},{"./lib/_stream_duplex.js":596,"dup":295}],596:[function(require,module,exports){
+arguments[4][296][0].apply(exports,arguments)
+},{"./_stream_readable":597,"./_stream_writable":598,"core-util-is":418,"dup":296,"inherits":462,"process-nextick-args":582}],597:[function(require,module,exports){
+arguments[4][298][0].apply(exports,arguments)
+},{"./_stream_duplex":596,"_process":279,"buffer":58,"core-util-is":418,"dup":298,"events":111,"inherits":462,"isarray":468,"process-nextick-args":582,"string_decoder/":634,"util":29}],598:[function(require,module,exports){
+arguments[4][300][0].apply(exports,arguments)
+},{"./_stream_duplex":596,"buffer":58,"core-util-is":418,"dup":300,"events":111,"inherits":462,"process-nextick-args":582,"util-deprecate":679}],599:[function(require,module,exports){
+arguments[4][305][0].apply(exports,arguments)
+},{"./lib/cookies":601,"./lib/helpers":604,"./request":610,"dup":305,"extend":430}],600:[function(require,module,exports){
+arguments[4][306][0].apply(exports,arguments)
+},{"./helpers":604,"caseless":416,"dup":306,"node-uuid":577}],601:[function(require,module,exports){
+arguments[4][307][0].apply(exports,arguments)
+},{"dup":307,"tough-cookie":659}],602:[function(require,module,exports){
+arguments[4][308][0].apply(exports,arguments)
+},{"_process":279,"dup":308}],603:[function(require,module,exports){
+arguments[4][309][0].apply(exports,arguments)
+},{"dup":309,"fs":56,"har-validator":437,"querystring":293,"util":396}],604:[function(require,module,exports){
+arguments[4][310][0].apply(exports,arguments)
+},{"_process":279,"buffer":58,"crypto":72,"dup":310,"json-stringify-safe":478}],605:[function(require,module,exports){
+arguments[4][311][0].apply(exports,arguments)
+},{"buffer":58,"combined-stream":417,"dup":311,"isstream":469,"node-uuid":577}],606:[function(require,module,exports){
+arguments[4][312][0].apply(exports,arguments)
+},{"buffer":58,"caseless":416,"crypto":72,"dup":312,"node-uuid":577,"oauth-sign":578,"qs":591,"url":392}],607:[function(require,module,exports){
+arguments[4][313][0].apply(exports,arguments)
+},{"dup":313,"qs":591,"querystring":293}],608:[function(require,module,exports){
+arguments[4][314][0].apply(exports,arguments)
+},{"dup":314,"url":392}],609:[function(require,module,exports){
+arguments[4][315][0].apply(exports,arguments)
+},{"dup":315,"tunnel-agent":667,"url":392}],610:[function(require,module,exports){
+arguments[4][316][0].apply(exports,arguments)
+},{"./lib/auth":600,"./lib/cookies":601,"./lib/getProxyFromURI":602,"./lib/har":603,"./lib/helpers":604,"./lib/multipart":605,"./lib/oauth":606,"./lib/querystring":607,"./lib/redirect":608,"./lib/tunnel":609,"_process":279,"aws-sign2":412,"bl":414,"buffer":58,"caseless":416,"dup":316,"forever-agent":432,"form-data":433,"hawk":455,"http":350,"http-signature":456,"https":150,"is-typedarray":467,"mime-types":567,"stream":349,"stringstream":635,"url":392,"util":396,"zlib":55}],611:[function(require,module,exports){
+arguments[4][327][0].apply(exports,arguments)
+},{"./lib/sse":612,"dup":327}],612:[function(require,module,exports){
+arguments[4][328][0].apply(exports,arguments)
+},{"./sseclient":613,"dup":328,"events":111,"options":579,"querystring":293,"url":392,"util":396}],613:[function(require,module,exports){
+arguments[4][329][0].apply(exports,arguments)
+},{"dup":329,"events":111,"util":396}],614:[function(require,module,exports){
+arguments[4][330][0].apply(exports,arguments)
+},{"buffer":58,"dup":330}],615:[function(require,module,exports){
+arguments[4][331][0].apply(exports,arguments)
+},{"./algs":614,"./key":627,"./private-key":628,"./utils":631,"assert-plus":632,"buffer":58,"crypto":72,"dup":331,"ecc-jsbn":423,"ecc-jsbn/lib/ec":424,"jodid25519":470,"jsbn":476}],616:[function(require,module,exports){
 (function (Buffer){
-/*
- * jwt-simple
- *
- * JSON Web Token encode and decode module for node.js
- *
- * Copyright(c) 2011 Kazuhito Hokamura
- * MIT Licensed
- */
+// Copyright 2015 Joyent, Inc.
 
-/**
- * module dependencies
- */
-var crypto = require('crypto');
-
-
-/**
- * support algorithm mapping
- */
-var algorithmMap = {
-  HS256: 'sha256',
-  HS384: 'sha384',
-  HS512: 'sha512',
-  RS256: 'RSA-SHA256'
+module.exports = {
+	Verifier: Verifier,
+	Signer: Signer
 };
 
-/**
- * Map algorithm to hmac or sign type, to determine which crypto function to use
- */
-var typeMap = {
-  HS256: 'hmac',
-  HS384: 'hmac',
-  HS512: 'hmac',
-  RS256: 'sign'
+var nacl;
+var stream = require('stream');
+var util = require('util');
+var assert = require('assert-plus');
+var Signature = require('./signature');
+
+function Verifier(key, hashAlgo) {
+	if (nacl === undefined)
+		nacl = require('tweetnacl');
+
+	if (hashAlgo.toLowerCase() !== 'sha512')
+		throw (new Error('ED25519 only supports the use of ' +
+		    'SHA-512 hashes'));
+
+	this.key = key;
+	this.chunks = [];
+
+	stream.Writable.call(this, {});
+}
+util.inherits(Verifier, stream.Writable);
+
+Verifier.prototype._write = function (chunk, enc, cb) {
+	this.chunks.push(chunk);
+	cb();
 };
 
-
-/**
- * expose object
- */
-var jwt = module.exports;
-
-
-/**
- * version
- */
-jwt.version = '0.2.0';
-
-/**
- * Decode jwt 
- *
- * @param {Object} token
- * @param {String} key 
- * @param {Boolean} noVerify 
- * @return {Object} payload
- * @api public
- */
-jwt.decode = function jwt_decode(token, key, noVerify) {
-  // check seguments
-  var segments = token.split('.');
-  if (segments.length !== 3) {
-    throw new Error('Not enough or too many segments');
-  }
-
-  // All segment should be base64
-  var headerSeg = segments[0];
-  var payloadSeg = segments[1];
-  var signatureSeg = segments[2];
-
-  // base64 decode and parse JSON
-  var header = JSON.parse(base64urlDecode(headerSeg));
-  var payload = JSON.parse(base64urlDecode(payloadSeg));
-
-  if (!noVerify) {
-    var signingMethod = algorithmMap[header.alg];
-    var signingType = typeMap[header.alg];
-    if (!signingMethod || !signingType) {
-      throw new Error('Algorithm not supported');
-    }
-  
-    // verify signature. `sign` will return base64 string.
-    var signingInput = [headerSeg, payloadSeg].join('.');
-    if (!verify(signingInput, key, signingMethod, signingType, signatureSeg)) {
-      throw new Error('Signature verification failed');
-    }
-  }
-
-  return payload;
+Verifier.prototype.update = function (chunk) {
+	if (typeof (chunk) === 'string')
+		chunk = new Buffer(chunk, 'binary');
+	this.chunks.push(chunk);
 };
 
+Verifier.prototype.verify = function (signature, fmt) {
+	var sig;
+	if (Signature.isSignature(signature, [2, 0])) {
+		if (signature.type !== 'ed25519')
+			return (false);
+		sig = signature.toBuffer('raw');
 
-/**
- * Encode jwt
- *
- * @param {Object} payload
- * @param {String} key 
- * @param {String} algorithm 
- * @return {String} token
- * @api public
- */
-jwt.encode = function jwt_encode(payload, key, algorithm) {
-  // Check key
-  if (!key) {
-    throw new Error('Require key');
-  }
+	} else if (typeof (signature) === 'string') {
+		sig = new Buffer(signature, 'base64');
 
-  // Check algorithm, default is HS256
-  if (!algorithm) {
-    algorithm = 'HS256';
-  }
+	} else if (Signature.isSignature(signature, [1, 0])) {
+		throw (new Error('signature was created by too old ' +
+		    'a version of sshpk and cannot be verified'));
+	}
 
-  var signingMethod = algorithmMap[algorithm];
-  var signingType = typeMap[algorithm];
-  if (!signingMethod || !signingType) {
-    throw new Error('Algorithm not supported');
-  }
+	assert.buffer(sig);
+	return (nacl.sign.detached.verify(
+	    new Uint8Array(Buffer.concat(this.chunks)),
+	    new Uint8Array(sig),
+	    new Uint8Array(this.key.part.R.data)));
+};
 
-  // header, typ is fixed value.
-  var header = { typ: 'JWT', alg: algorithm };
+function Signer(key, hashAlgo) {
+	if (nacl === undefined)
+		nacl = require('tweetnacl');
 
-  // create segments, all segment should be base64 string
-  var segments = [];
-  segments.push(base64urlEncode(JSON.stringify(header)));
-  segments.push(base64urlEncode(JSON.stringify(payload)));
-  segments.push(sign(segments.join('.'), key, signingMethod, signingType));
-  
-  return segments.join('.');
+	if (hashAlgo.toLowerCase() !== 'sha512')
+		throw (new Error('ED25519 only supports the use of ' +
+		    'SHA-512 hashes'));
+
+	this.key = key;
+	this.chunks = [];
+
+	stream.Writable.call(this, {});
 }
+util.inherits(Signer, stream.Writable);
 
+Signer.prototype._write = function (chunk, enc, cb) {
+	this.chunks.push(chunk);
+	cb();
+};
 
-/**
- * private util functions
- */
+Signer.prototype.update = function (chunk) {
+	if (typeof (chunk) === 'string')
+		chunk = new Buffer(chunk, 'binary');
+	this.chunks.push(chunk);
+};
 
-function verify(input, key, method, type, signature) {
-  if(type === "hmac") {
-    return (signature === sign(input, key, method, type));
-  }
-  else if(type == "sign") {
-    return crypto.createVerify(method)
-                 .update(input)
-                 .verify(key, base64urlUnescape(signature), 'base64');
-  }
-  else {
-    throw new Error('Algorithm type not recognized');
-  }
-}
-
-function sign(input, key, method, type) {
-  var base64str;
-  if(type === "hmac") {
-    base64str = crypto.createHmac(method, key).update(input).digest('base64');
-  }
-  else if(type == "sign") {
-    base64str = crypto.createSign(method).update(input).sign(key, 'base64');
-  }
-  else {
-    throw new Error('Algorithm type not recognized');
-  }
-
-  return base64urlEscape(base64str);
-}
-
-function base64urlDecode(str) {
-  return new Buffer(base64urlUnescape(str), 'base64').toString();
-}
-
-function base64urlUnescape(str) {
-  str += Array(5 - str.length % 4).join('=');
-  return str.replace(/\-/g, '+').replace(/_/g, '/');
-}
-
-function base64urlEncode(str) {
-  return base64urlEscape(new Buffer(str).toString('base64'));
-}
-
-function base64urlEscape(str) {
-  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-}
+Signer.prototype.sign = function () {
+	var sig = nacl.sign.detached(
+	    new Uint8Array(Buffer.concat(this.chunks)),
+	    new Uint8Array(this.key.part.r.data));
+	var sigBuf = new Buffer(sig);
+	var sigObj = Signature.parse(sigBuf, 'ed25519', 'raw');
+	sigObj.hashAlgorithm = 'sha512';
+	return (sigObj);
+};
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":58,"crypto":72}],510:[function(require,module,exports){
-(function (process){
-'use strict';
-var env = process.env;
-var home = env.HOME;
-var user = env.LOGNAME || env.USER || env.LNAME || env.USERNAME;
-
-if (process.platform === 'win32') {
-	module.exports = env.USERPROFILE || env.HOMEDRIVE + env.HOMEPATH || home || null;
-} else if (process.platform === 'darwin') {
-	module.exports = home || (user ? '/Users/' + user : null) || null;
-} else if (process.platform === 'linux') {
-	module.exports = home ||
-		(user ? (process.getuid() === 0 ? '/root' : '/home/' + user) : null) || null;
-} else {
-	module.exports = home || null;
-}
-
-}).call(this,require('_process'))
-},{"_process":279}],511:[function(require,module,exports){
-arguments[4][176][0].apply(exports,arguments)
-},{"./lib/remote-connector":513,"dup":176}],512:[function(require,module,exports){
-/*!
- * Dependencies
- */
-var relation = require('loopback-datasource-juggler/lib/relation-definition');
-var RelationDefinition = relation.RelationDefinition;
-
-module.exports = RelationMixin;
-
-/**
- * RelationMixin class.  Use to define relationships between models.
- *
- * @class RelationMixin
- */
-function RelationMixin() {
-}
-
-/**
- * Define a "one to many" relationship by specifying the model name
- *
- * Examples:
- * ```
- * User.hasMany(Post, {as: 'posts', foreignKey: 'authorId'});
- * ```
- *
- * ```
- * Book.hasMany(Chapter);
- * ```
- * Or, equivalently:
- * ```
- * Book.hasMany('chapters', {model: Chapter});
- * ```
- *
- * Query and create related models:
- *
- * ```js
- * Book.create(function(err, book) {
- * 
- *   // Create a chapter instance ready to be saved in the data source.
- *   var chapter = book.chapters.build({name: 'Chapter 1'});
- * 
- *   // Save the new chapter
- *   chapter.save();
- * 
- *  // you can also call the Chapter.create method with the `chapters` property which will build a chapter
- *  // instance and save the it in the data source.
- *  book.chapters.create({name: 'Chapter 2'}, function(err, savedChapter) {
- *  // this callback is optional
- *  });
- * 
- *   // Query chapters for the book  
- *   book.chapters(function(err, chapters) {  // all chapters with bookId = book.id 
- *     console.log(chapters);
- *   });
- * 
- *   book.chapters({where: {name: 'test'}, function(err, chapters) {
- *    // All chapters with bookId = book.id and name = 'test'
- *     console.log(chapters);
- *   });
- * });
- *```
- * @param {Object|String} modelTo Model object (or String name of model) to which you are creating the relationship.
- * @options {Object} parameters Configuration parameters; see below.
- * @property {String} as Name of the property in the referring model that corresponds to the foreign key field in the related model.
- * @property {String} foreignKey Property name of foreign key field.
- * @property {Object} model Model object
- */
-RelationMixin.hasMany = function hasMany(modelTo, params) {
-  var def = RelationDefinition.hasMany(this, modelTo, params);
-  this.dataSource.adapter.resolve(this);
-  defineRelationProperty(this, def);
-};
-
-/**
- * Declare "belongsTo" relation that sets up a one-to-one connection with another model, such that each
- * instance of the declaring model "belongs to" one instance of the other model.
- *
- * For example, if an application includes users and posts, and each post can be written by exactly one user.
- * The following code specifies that `Post` has a reference called `author` to the `User` model via the `userId` property of `Post`
- * as the foreign key.
- * ```
- * Post.belongsTo(User, {as: 'author', foreignKey: 'userId'});
- * ```
- * You can then access the author in one of the following styles.
- * Get the User object for the post author asynchronously:
- * ```
- * post.author(callback);
- * ```
- * Get the User object for the post author synchronously:
- * ```
- * post.author();
- * Set the author to be the given user:
- * ```
- * post.author(user)
- * ```
- * Examples:
- *
- * Suppose the model Post has a *belongsTo* relationship with User (the author of the post). You could declare it this way:
- * ```js
- * Post.belongsTo(User, {as: 'author', foreignKey: 'userId'});
- * ```
- *
- * When a post is loaded, you can load the related author with:
- * ```js
- * post.author(function(err, user) {
- *     // the user variable is your user object
- * });
- * ```
- *
- * The related object is cached, so if later you try to get again the author, no additional request will be made.
- * But there is an optional boolean parameter in first position that set whether or not you want to reload the cache:
- * ```js
- * post.author(true, function(err, user) {
- *     // The user is reloaded, even if it was already cached.
- * });
- * ```
- * This optional parameter default value is false, so the related object will be loaded from cache if available.
- *
- * @param {Class|String} modelTo Model object (or String name of model) to which you are creating the relationship.
- * @options {Object} params Configuration parameters; see below.
- * @property {String} as Name of the property in the referring model that corresponds to the foreign key field in the related model.
- * @property {String} foreignKey Name of foreign key property.
- *
- */
-RelationMixin.belongsTo = function(modelTo, params) {
-  var def = RelationDefinition.belongsTo(this, modelTo, params);
-  this.dataSource.adapter.resolve(this);
-  defineRelationProperty(this, def);
-};
-
-/**
- * A hasAndBelongsToMany relation creates a direct many-to-many connection with another model, with no intervening model.
- * For example, if your application includes users and groups, with each group having many users and each user appearing
- * in many groups, you could declare the models this way:
- * ```
- *  User.hasAndBelongsToMany('groups', {model: Group, foreignKey: 'groupId'});
- * ```
- *  Then, to get the groups to which the user belongs:
- * ```
- *  user.groups(callback);
- * ```
- *  Create a new group and connect it with the user:
- * ```
- *  user.groups.create(data, callback);
- * ```
- *  Connect an existing group with the user:
- * ```
- *  user.groups.add(group, callback);
- * ```
- *  Remove the user from the group:
- * ```
- *  user.groups.remove(group, callback);
- * ```
- *
- * @param {String|Object} modelTo Model object (or String name of model) to which you are creating the relationship.
- * the relation
- * @options {Object} params Configuration parameters; see below.
- * @property {String} as Name of the property in the referring model that corresponds to the foreign key field in the related model.
- * @property {String} foreignKey Property name of foreign key field.
- * @property {Object} model Model object
- */
-RelationMixin.hasAndBelongsToMany =
-  function hasAndBelongsToMany(modelTo, params) {
-    var def = RelationDefinition.hasAndBelongsToMany(this, modelTo, params);
-    this.dataSource.adapter.resolve(this);
-    defineRelationProperty(this, def);
-  };
-
-RelationMixin.hasOne = function hasOne(modelTo, params) {
-  var def = RelationDefinition.hasOne(this, modelTo, params);
-  this.dataSource.adapter.resolve(this);
-  defineRelationProperty(this, def);
-};
-
-RelationMixin.referencesMany = function referencesMany(modelTo, params) {
-  var def = RelationDefinition.referencesMany(this, modelTo, params);
-  this.dataSource.adapter.resolve(this);
-  defineRelationProperty(this, def);
-};
-
-RelationMixin.embedsOne = function embedsOne(modelTo, params) {
-  var def = RelationDefinition.embedsOne(this, modelTo, params);
-  this.dataSource.adapter.resolve(this);
-  defineRelationProperty(this, def);
-};
-
-RelationMixin.embedsMany = function embedsMany(modelTo, params) {
-  var def = RelationDefinition.embedsMany(this, modelTo, params);
-  this.dataSource.adapter.resolve(this);
-  defineRelationProperty(this, def);
-};
-
-function defineRelationProperty(modelClass, def) {
-  Object.defineProperty(modelClass.prototype, def.name, {
-    get: function() {
-      var that = this;
-      var scope = function() {
-        return that['__get__' + def.name].apply(that, arguments);
-      };
-      scope.count = function() {
-        return that['__count__' + def.name].apply(that, arguments);
-      };
-      scope.create = function() {
-        return that['__create__' + def.name].apply(that, arguments);
-      };
-      scope.deleteById = destroyById = function() {
-        return that['__destroyById__' + def.name].apply(that, arguments);
-      };
-      scope.exists = function() {
-        return that['__exists__' + def.name].apply(that, arguments);
-      };
-      scope.findById = function() {
-        return that['__findById__' + def.name].apply(that, arguments);
-      };
-      return scope;
-    }
-  });
-}
-},{"loopback-datasource-juggler/lib/relation-definition":537}],513:[function(require,module,exports){
-(function (process){
-/**
- * Dependencies.
- */
-
-var assert = require('assert');
-var remoting = require('strong-remoting');
-var jutil = require('loopback-datasource-juggler/lib/jutil');
-var RelationMixin = require('./relations');
-
-/**
- * Export the RemoteConnector class.
- */
-
-module.exports = RemoteConnector;
-
-/**
- * Create an instance of the connector with the given `settings`.
- */
-
-function RemoteConnector(settings) {
-  assert(typeof settings ===
-    'object',
-    'cannot initiaze RemoteConnector without a settings object');
-  this.client = settings.client;
-  this.adapter = settings.adapter || 'rest';
-  this.protocol = settings.protocol || 'http'
-  this.root = settings.root || '';
-  this.host = settings.host || 'localhost';
-  this.port = settings.port || 3000;
-  this.remotes = remoting.create();
-  this.name = 'remote-connector';
-
-  if (settings.url) {
-    this.url = settings.url;
-  } else {
-    this.url = this.protocol + '://' + this.host + ':' + this.port + this.root;
-  }
-
-  // handle mixins in the define() method
-  var DAO = this.DataAccessObject = function() {
-  };
-}
-
-RemoteConnector.prototype.connect = function() {
-  this.remotes.connect(this.url, this.adapter);
-};
-
-RemoteConnector.initialize = function(dataSource, callback) {
-  var connector = dataSource.connector =
-    new RemoteConnector(dataSource.settings);
-  connector.connect();
-  process.nextTick(callback);
-};
-
-RemoteConnector.prototype.define = function(definition) {
-  var Model = definition.model;
-  var remotes = this.remotes;
-
-  assert(Model.sharedClass,
-      'cannot attach ' +
-      Model.modelName +
-      ' to a remote connector without a Model.sharedClass');
-
-  jutil.mixin(Model, RelationMixin);
-  remotes.addClass(Model.sharedClass);
-  this.resolve(Model);
-};
-
-RemoteConnector.prototype.resolve = function(Model) {
-  var remotes = this.remotes;
-
-  Model.sharedClass.methods().forEach(function(remoteMethod) {
-    if (remoteMethod.name !== 'Change' && remoteMethod.name !== 'Checkpoint') {
-      createProxyMethod(Model, remotes, remoteMethod);
-    }
-  });
-};
-
-function createProxyMethod(Model, remotes, remoteMethod) {
-  var scope = remoteMethod.isStatic ? Model : Model.prototype;
-  var original = scope[remoteMethod.name];
-
-  scope[remoteMethod.name] = function remoteMethodProxy() {
-    var args = Array.prototype.slice.call(arguments);
-    var lastArgIsFunc = typeof args[args.length - 1] === 'function';
-    var callback;
-    if (lastArgIsFunc) {
-      callback = args.pop();
-    }
-
-    if (remoteMethod.isStatic) {
-      return remotes.invoke(remoteMethod.stringName, args, callback);
-    }
-
-    var ctorArgs = [this.id];
-    return remotes.invoke(remoteMethod.stringName, ctorArgs, args, callback);
-  }
-}
-
-function noop() {
-}
-
-}).call(this,require('_process'))
-},{"./relations":512,"_process":279,"assert":22,"loopback-datasource-juggler/lib/jutil":530,"strong-remoting":645}],514:[function(require,module,exports){
-arguments[4][179][0].apply(exports,arguments)
-},{"./lib/connector":515,"./lib/sql":517,"./lib/transaction":518,"dup":179}],515:[function(require,module,exports){
-arguments[4][180][0].apply(exports,arguments)
-},{"_process":279,"debug":417,"dup":180}],516:[function(require,module,exports){
-arguments[4][181][0].apply(exports,arguments)
-},{"assert":22,"dup":181}],517:[function(require,module,exports){
-arguments[4][182][0].apply(exports,arguments)
-},{"./connector":515,"./parameterized-sql":516,"./transaction":518,"_process":279,"assert":22,"async":519,"debug":417,"dup":182,"util":396}],518:[function(require,module,exports){
-arguments[4][183][0].apply(exports,arguments)
-},{"assert":22,"debug":417,"dup":183,"events":111,"util":396}],519:[function(require,module,exports){
-arguments[4][184][0].apply(exports,arguments)
-},{"_process":279,"dup":184}],520:[function(require,module,exports){
-arguments[4][185][0].apply(exports,arguments)
-},{"./lib/datasource.js":524,"./lib/geo.js":525,"./lib/model-builder.js":533,"./lib/model.js":535,"./lib/validations.js":543,"./package.json":550,"dup":185,"loopback-connector":514}],521:[function(require,module,exports){
-arguments[4][186][0].apply(exports,arguments)
-},{"_process":279,"dup":186}],522:[function(require,module,exports){
-arguments[4][187][0].apply(exports,arguments)
-},{"../geo":525,"../utils":542,"_process":279,"async":544,"dup":187,"fs":56,"loopback-connector":514,"util":396}],523:[function(require,module,exports){
-arguments[4][188][0].apply(exports,arguments)
-},{"./connectors/memory":522,"./geo":525,"./include.js":527,"./jutil":530,"./list.js":531,"./model":535,"./relations.js":538,"./scope.js":539,"./transaction":540,"./utils":542,"./validations":543,"_process":279,"assert":22,"async":544,"debug":417,"dup":188,"util":396}],524:[function(require,module,exports){
-arguments[4][189][0].apply(exports,arguments)
-},{"./dao.js":523,"./jutil":530,"./model-builder.js":533,"./model-definition.js":534,"./model.js":535,"./observer":536,"./relation-definition.js":537,"./scope.js":539,"./utils":542,"_process":279,"assert":22,"async":544,"debug":417,"dup":189,"events":111,"traverse":667,"util":396}],525:[function(require,module,exports){
-arguments[4][190][0].apply(exports,arguments)
-},{"assert":22,"dup":190}],526:[function(require,module,exports){
-arguments[4][191][0].apply(exports,arguments)
-},{"depd":521,"dup":191}],527:[function(require,module,exports){
-(function (process){
-var async = require('async');
-var utils = require('./utils');
-var List = require('./list');
-var includeUtils = require('./include_utils');
-var isPlainObject = utils.isPlainObject;
-var defineCachedRelations = utils.defineCachedRelations;
-var uniq = utils.uniq;
-
-/*!
- * Normalize the include to be an array
- * @param include
- * @returns {*}
- */
-function normalizeInclude(include) {
-  var newInclude;
-  if (typeof include === 'string') {
-    return [include];
-  } else if (isPlainObject(include)) {
-    // Build an array of key/value pairs
-    newInclude = [];
-    var rel = include.rel || include.relation;
-    var obj = {};
-    if (typeof rel === 'string') {
-      obj[rel] = new IncludeScope(include.scope);
-      newInclude.push(obj);
-    } else {
-      for (var key in include) {
-        obj[key] = include[key];
-        newInclude.push(obj);
-      }
-    }
-    return newInclude;
-  } else if (Array.isArray(include)) {
-    newInclude = [];
-    for (var i = 0, n = include.length; i < n; i++) {
-      var subIncludes = normalizeInclude(include[i]);
-      newInclude = newInclude.concat(subIncludes);
-    }
-    return newInclude;
-  } else {
-    return include;
-  }
-}
-
-function IncludeScope(scope) {
-  this._scope = utils.deepMerge({}, scope || {});
-  if (this._scope.include) {
-    this._include = normalizeInclude(this._scope.include);
-    delete this._scope.include;
-  } else {
-    this._include = null;
-  }
-};
-
-IncludeScope.prototype.conditions = function() {
-  return utils.deepMerge({}, this._scope);
-};
-
-IncludeScope.prototype.include = function() {
-  return this._include;
-};
-
-/**
- * Find the idKey of a Model.
- * @param {ModelConstructor} m - Model Constructor
- * @returns {String}
- */
-function idName(m) {
-  return m.definition.idName() || 'id';
-}
-
-/*!
- * Look up a model by name from the list of given models
- * @param {Object} models Models keyed by name
- * @param {String} modelName The model name
- * @returns {*} The matching model class
- */
-function lookupModel(models, modelName) {
-  if (models[modelName]) {
-    return models[modelName];
-  }
-  var lookupClassName = modelName.toLowerCase();
-  for (var name in models) {
-    if (name.toLowerCase() === lookupClassName) {
-      return models[name];
-    }
-  }
-}
-
-/**
- * Utility Function to allow interleave before and after high computation tasks
- * @param tasks
- * @param callback
- */
-function execTasksWithInterLeave(tasks, callback) {
-  //let's give others some time to process.
-  //Context Switch BEFORE Heavy Computation
-  process.nextTick(function () {
-    //Heavy Computation
-    async.parallel(tasks, function (err, info) {
-      //Context Switch AFTER Heavy Computation
-      process.nextTick(function () {
-        callback(err, info);
-      });
-    });
-  });
-}
-
-/*!
- * Include mixin for ./model.js
- */
-module.exports = Inclusion;
-
-/**
- * Inclusion - Model mixin.
- *
- * @class
- */
-
-function Inclusion() {
-}
-
-/**
- * Normalize includes - used in DataAccessObject
- *
- */
-
-Inclusion.normalizeInclude = normalizeInclude;
-
-/**
- * Enables you to load relations of several objects and optimize numbers of requests.
- *
- * Examples:
- *
- * Load all users' posts with only one additional request:
- * `User.include(users, 'posts', function() {});`
- * Or
- * `User.include(users, ['posts'], function() {});`
- *
- * Load all users posts and passports with two additional requests:
- * `User.include(users, ['posts', 'passports'], function() {});`
- *
- * Load all passports owner (users), and all posts of each owner loaded:
- *```Passport.include(passports, {owner: 'posts'}, function() {});
- *``` Passport.include(passports, {owner: ['posts', 'passports']});
- *``` Passport.include(passports, {owner: [{posts: 'images'}, 'passports']});
- *
- * @param {Array} objects Array of instances
- * @param {String|Object|Array} include Which relations to load.
- * @param {Object} [options] Options for CRUD
- * @param {Function} cb Callback called when relations are loaded
- *
- */
-Inclusion.include = function (objects, include, options, cb) {
-  if (typeof options === 'function' && cb === undefined) {
-    cb = options;
-    options = {};
-  }
-  var self = this;
-
-  if (!include || (Array.isArray(include) && include.length === 0) ||
-      (Array.isArray(objects) && objects.length === 0) ||
-      (isPlainObject(include) && Object.keys(include).length === 0)) {
-    // The objects are empty
-    return process.nextTick(function() {
-      cb && cb(null, objects);
-    });
-  }
-
-  include = normalizeInclude(include);
-
-  async.each(include, function(item, callback) {
-    processIncludeItem(objects, item, options, callback);
-  }, function(err) {
-    cb && cb(err, objects);
-  });
-
-  function processIncludeItem(objs, include, options, cb) {
-    var relations = self.relations;
-
-    var relationName;
-    var subInclude = null, scope = null;
-
-    if (isPlainObject(include)) {
-      relationName = Object.keys(include)[0];
-      if (include[relationName] instanceof IncludeScope) {
-        scope = include[relationName];
-        subInclude = scope.include();
-      } else {
-        subInclude = include[relationName];
-        //when include = {user:true}, it does not have subInclude
-        if (subInclude === true) {
-          subInclude = null;
-        }
-      }
-    }
-    else {
-      relationName = include;
-      subInclude = null;
-    }
-
-    var relation = relations[relationName];
-    if (!relation) {
-      cb(new Error('Relation "' + relationName + '" is not defined for '
-        + self.modelName + ' model'));
-      return;
-    }
-    var polymorphic = relation.polymorphic;
-    //if (polymorphic && !polymorphic.discriminator) {
-    //  cb(new Error('Relation "' + relationName + '" is polymorphic but ' +
-    //    'discriminator is not present'));
-    //  return;
-    //}
-    if (!relation.modelTo) {
-      if (!relation.polymorphic) {
-        cb(new Error('Relation.modelTo is not defined for relation' +
-          relationName + ' and is no polymorphic'));
-        return;
-      }
-    }
-
-    // Just skip if inclusion is disabled
-    if (relation.options.disableInclude) {
-      return cb();
-    }
-    //prepare filter and fields for making DB Call
-    var filter = (scope && scope.conditions()) || {};
-    if ((relation.multiple || relation.type === 'belongsTo') && scope) {
-      var includeScope = {};
-      // make sure not to miss any fields for sub includes
-      if (filter.fields && Array.isArray(subInclude) &&
-        relation.modelTo.relations) {
-        includeScope.fields = [];
-        subInclude.forEach(function (name) {
-          var rel = relation.modelTo.relations[name];
-          if (rel && rel.type === 'belongsTo') {
-            includeScope.fields.push(rel.keyFrom);
-          }
-        });
-      }
-      utils.mergeQuery(filter, includeScope, {fields: false});
-    }
-    //Let's add a placeholder where query
-    filter.where = filter.where || {};
-    //if fields are specified, make sure target foreign key is present
-    var fields = filter.fields;
-    if (Array.isArray(fields) && fields.indexOf(relation.keyTo) === -1) {
-      fields.push(relation.keyTo);
-    }
-    else if (isPlainObject(fields) && !fields[relation.keyTo]) {
-      fields[relation.keyTo] = true;
-    }
-
-    /**
-     * call relation specific include functions
-     */
-    if (relation.multiple) {
-      if (relation.modelThrough) {
-        //hasManyThrough needs separate handling
-        return includeHasManyThrough(cb);
-      }
-      //This will also include embedsMany with belongsTo.
-      //Might need to optimize db calls for this.
-      if (relation.type === 'embedsMany') {
-        //embedded docs are part of the objects, no need to make db call.
-        //proceed as implemented earlier.
-        return includeEmbeds(cb);
-      }
-      if (relation.type === 'referencesMany') {
-        return includeReferencesMany(cb);
-      }
-
-      //This handles exactly hasMany. Fast and straightforward. Without parallel, each and other boilerplate.
-      if(relation.type === 'hasMany' && relation.multiple && !subInclude){
-        return includeHasManySimple(cb);
-      }
-      //assuming all other relations with multiple=true as hasMany
-      return includeHasMany(cb);
-    }
-    else {
-      if (polymorphic) {
-        if (relation.type === 'hasOne') {
-          return includePolymorphicHasOne(cb);
-        }
-        return includePolymorphicBelongsTo(cb);
-      }
-      if (relation.type === 'embedsOne') {
-        return includeEmbeds(cb);
-      }
-      //hasOne or belongsTo
-      return includeOneToOne(cb);
-    }
-
-    /**
-     * Handle inclusion of HasManyThrough/HasAndBelongsToMany/Polymorphic
-     * HasManyThrough relations
-     * @param callback
-     */
-    function includeHasManyThrough(callback) {
-      var sourceIds = [];
-      //Map for Indexing objects by their id for faster retrieval
-      var objIdMap = {};
-      for (var i = 0; i < objs.length; i++) {
-        var obj = objs[i];
-        // one-to-many: foreign key reference is modelTo -> modelFrom.
-        // use modelFrom.keyFrom in where filter later
-        var sourceId = obj[relation.keyFrom];
-        if (sourceId) {
-          sourceIds.push(sourceId);
-          objIdMap[sourceId.toString()] = obj;
-        }
-        // sourceId can be null. but cache empty data as result
-        defineCachedRelations(obj);
-        obj.__cachedRelations[relationName] = [];
-      }
-      //default filters are not applicable on through model. should be applied
-      //on modelTo later in 2nd DB call.
-      var throughFilter = {
-        where: {}
-      };
-      throughFilter.where[relation.keyTo] = {
-        inq: uniq(sourceIds)
-      };
-      if (polymorphic) {
-        //handle polymorphic hasMany (reverse) in which case we need to filter
-        //by discriminator to filter other types
-        throughFilter.where[polymorphic.discriminator] =
-          relation.modelFrom.definition.name;
-      }
-      /**
-       * 1st DB Call of 2 step process. Get through model objects first
-       */
-      relation.modelThrough.find(throughFilter, options, throughFetchHandler);
-      /**
-       * Handle the results of Through model objects and fetch the modelTo items
-       * @param err
-       * @param {Array<Model>} throughObjs
-       * @returns {*}
-       */
-      function throughFetchHandler(err, throughObjs) {
-        if (err) {
-          return callback(err);
-        }
-        // start preparing for 2nd DB call.
-        var targetIds = [];
-        var targetObjsMap = {};
-        for (var i = 0; i < throughObjs.length; i++) {
-          var throughObj = throughObjs[i];
-          var targetId = throughObj[relation.keyThrough];
-          if (targetId) {
-            //save targetIds for 2nd DB Call
-            targetIds.push(targetId);
-            var sourceObj = objIdMap[throughObj[relation.keyTo]];
-            var targetIdStr = targetId.toString();
-            //Since targetId can be duplicates, multiple source objs are put
-            //into buckets.
-            var objList = targetObjsMap[targetIdStr] =
-              targetObjsMap[targetIdStr] || [];
-            objList.push(sourceObj);
-          }
-        }
-        //Polymorphic relation does not have idKey of modelTo. Find it manually
-        var modelToIdName = idName(relation.modelTo);
-        filter.where[modelToIdName] = {
-          inq: uniq(targetIds)
-        };
-
-        //make sure that the modelToIdName is included if fields are specified
-        if (Array.isArray(fields) && fields.indexOf(modelToIdName) === -1) {
-          fields.push(modelToIdName);
-        }
-        else if (isPlainObject(fields) && !fields[modelToIdName]) {
-          fields[modelToIdName] = true;
-        }
-
-        /**
-         * 2nd DB Call of 2 step process. Get modelTo (target) objects
-         */
-        relation.modelTo.find(filter, options, targetsFetchHandler);
-        function targetsFetchHandler(err, targets) {
-          if (err) {
-            return callback(err);
-          }
-          var tasks = [];
-          //simultaneously process subIncludes. Call it first as it is an async
-          //process.
-          if (subInclude && targets) {
-            tasks.push(function subIncludesTask(next) {
-              relation.modelTo.include(targets, subInclude, options, next);
-            });
-          }
-          //process & link each target with object
-          tasks.push(targetLinkingTask);
-          function targetLinkingTask(next) {
-            async.each(targets, linkManyToMany, next);
-            function linkManyToMany(target, next) {
-              var targetId = target[modelToIdName];
-              var objList = targetObjsMap[targetId.toString()];
-              async.each(objList, function (obj, next) {
-                if (!obj) return next();
-                obj.__cachedRelations[relationName].push(target);
-                processTargetObj(obj, next);
-              }, next);
-            }
-          }
-
-          execTasksWithInterLeave(tasks, callback);
-        }
-      }
-    }
-
-    /**
-     * Handle inclusion of ReferencesMany relation
-     * @param callback
-     */
-    function includeReferencesMany(callback) {
-      var modelToIdName = idName(relation.modelTo);
-      var allTargetIds = [];
-      //Map for Indexing objects by their id for faster retrieval
-      var targetObjsMap = {};
-      for (var i = 0; i < objs.length; i++) {
-        var obj = objs[i];
-        // one-to-many: foreign key reference is modelTo -> modelFrom.
-        // use modelFrom.keyFrom in where filter later
-        var targetIds = obj[relation.keyFrom];
-        if (targetIds) {
-          if (typeof targetIds === 'string') {
-            // For relational DBs, the array is stored as stringified json
-            // Please note obj is a plain object at this point
-            targetIds = JSON.parse(targetIds);
-          }
-          //referencesMany has multiple targetIds per obj. We need to concat
-          // them into allTargetIds before DB Call
-          allTargetIds = allTargetIds.concat(targetIds);
-          for (var j = 0; j < targetIds.length; j++) {
-            var targetId = targetIds[j];
-            var targetIdStr = targetId.toString();
-            var objList = targetObjsMap[targetIdStr] =
-              targetObjsMap[targetIdStr] || [];
-            objList.push(obj);
-          }
-        }
-        // sourceId can be null. but cache empty data as result
-        defineCachedRelations(obj);
-        obj.__cachedRelations[relationName] = [];
-      }
-      filter.where[relation.keyTo] = {
-        inq: uniq(allTargetIds)
-      };
-      relation.applyScope(null, filter);
-      /**
-       * Make the DB Call, fetch all target objects
-       */
-      relation.modelTo.find(filter, options, targetFetchHandler);
-      /**
-       * Handle the fetched target objects
-       * @param err
-       * @param {Array<Model>}targets
-       * @returns {*}
-       */
-      function targetFetchHandler(err, targets) {
-        if (err) {
-          return callback(err);
-        }
-        var tasks = [];
-        //simultaneously process subIncludes
-        if (subInclude && targets) {
-          tasks.push(function subIncludesTask(next) {
-            relation.modelTo.include(targets, subInclude, options, next);
-          });
-        }
-        targets = utils.sortObjectsByIds(modelToIdName, allTargetIds, targets);
-        //process each target object
-        tasks.push(targetLinkingTask);
-        function targetLinkingTask(next) {
-          async.each(targets, linkManyToMany, next);
-          function linkManyToMany(target, next) {
-            var objList = targetObjsMap[target[relation.keyTo].toString()];
-            async.each(objList, function (obj, next) {
-              if (!obj) return next();
-              obj.__cachedRelations[relationName].push(target);
-              processTargetObj(obj, next);
-            }, next);
-
-          }
-        }
-
-        execTasksWithInterLeave(tasks, callback);
-      }
-    }
-
-    /**
-     * Handle inclusion of HasMany relation
-     * @param callback
-     */
-    function includeHasManySimple(callback) {
-      //Map for Indexing objects by their id for faster retrieval
-      var objIdMap2 = includeUtils.buildOneToOneIdentityMapWithOrigKeys(objs, relation.keyFrom);
-
-      filter.where[relation.keyTo] = {
-        inq: uniq(objIdMap2.getKeys())
-      };
-
-      relation.applyScope(null, filter);
-      relation.modelTo.find(filter, options, targetFetchHandler);
-
-      function targetFetchHandler(err, targets) {
-        if(err) {
-          return callback(err);
-        }
-        var targetsIdMap = includeUtils.buildOneToManyIdentityMapWithOrigKeys(targets, relation.keyTo);
-        includeUtils.join(objIdMap2, targetsIdMap, function(obj1, valueToMergeIn){
-          defineCachedRelations(obj1);
-          obj1.__cachedRelations[relationName] = valueToMergeIn;
-          processTargetObj(obj1, function(){});
-        });
-        callback(err, objs);
-      }
-    }
-
-    /**
-     * Handle inclusion of HasMany relation
-     * @param callback
-     */
-    function includeHasMany(callback) {
-      var sourceIds = [];
-      //Map for Indexing objects by their id for faster retrieval
-      var objIdMap = {};
-      for (var i = 0; i < objs.length; i++) {
-        var obj = objs[i];
-        // one-to-many: foreign key reference is modelTo -> modelFrom.
-        // use modelFrom.keyFrom in where filter later
-        var sourceId = obj[relation.keyFrom];
-        if (sourceId) {
-          sourceIds.push(sourceId);
-          objIdMap[sourceId.toString()] = obj;
-        }
-        // sourceId can be null. but cache empty data as result
-        defineCachedRelations(obj);
-        obj.__cachedRelations[relationName] = [];
-      }
-      filter.where[relation.keyTo] = {
-        inq: uniq(sourceIds)
-      };
-      relation.applyScope(null, filter);
-      options.partitionBy = relation.keyTo;
-      relation.modelTo.find(filter, options, targetFetchHandler);
-      /**
-       * Process fetched related objects
-       * @param err
-       * @param {Array<Model>} targets
-       * @returns {*}
-       */
-      function targetFetchHandler(err, targets) {
-        if (err) {
-          return callback(err);
-        }
-        var tasks = [];
-        //simultaneously process subIncludes
-        if (subInclude && targets) {
-          tasks.push(function subIncludesTask(next) {
-            relation.modelTo.include(targets, subInclude, options, next);
-          });
-        }
-        //process each target object
-        tasks.push(targetLinkingTask);
-        function targetLinkingTask(next) {
-          if (targets.length === 0) {
-            return async.each(objs, function(obj, next) {
-              processTargetObj(obj, next);
-            }, next);
-          }
-
-          async.each(targets, linkManyToOne, next);
-          function linkManyToOne(target, next) {
-            //fix for bug in hasMany with referencesMany
-            var targetIds = [].concat(target[relation.keyTo]);
-            async.each(targetIds, function (targetId, next) {
-              var obj = objIdMap[targetId.toString()];
-              if (!obj) return next();
-              obj.__cachedRelations[relationName].push(target);
-              processTargetObj(obj, next);
-            }, function(err, processedTargets) {
-              if (err) {
-                return next(err);
-              }
-
-              var objsWithEmptyRelation = objs.filter(function(obj) {
-                return obj.__cachedRelations[relationName].length === 0;
-              });
-              async.each(objsWithEmptyRelation, function(obj, next) {
-                processTargetObj(obj, next);
-              }, function(err) {
-                next(err, processedTargets);
-              });
-            });
-          }
-        }
-
-        execTasksWithInterLeave(tasks, callback);
-      }
-    }
-
-    /**
-     * Handle Inclusion of Polymorphic BelongsTo relation
-     * @param callback
-     */
-    function includePolymorphicBelongsTo(callback) {
-      var targetIdsByType = {};
-      //Map for Indexing objects by their type and targetId for faster retrieval
-      var targetObjMapByType = {};
-      for (var i = 0; i < objs.length; i++) {
-        var obj = objs[i];
-        var discriminator = polymorphic.discriminator;
-        var modelType = obj[discriminator];
-        if (modelType) {
-          targetIdsByType[modelType] = targetIdsByType[modelType] || [];
-          targetObjMapByType[modelType] = targetObjMapByType[modelType] || {};
-          var targetIds = targetIdsByType[modelType];
-          var targetObjsMap = targetObjMapByType[modelType];
-          var targetId = obj[relation.keyFrom];
-          if (targetId) {
-            targetIds.push(targetId);
-            var targetIdStr = targetId.toString();
-            targetObjsMap[targetIdStr] = targetObjsMap[targetIdStr] || [];
-            //Is belongsTo. Multiple objects can have the same
-            //targetId and therefore map value is an array
-            targetObjsMap[targetIdStr].push(obj);
-          }
-        }
-        defineCachedRelations(obj);
-        obj.__cachedRelations[relationName] = null;
-      }
-      async.each(Object.keys(targetIdsByType), processPolymorphicType,
-        callback);
-      /**
-       * Process Polymorphic objects of each type (modelType)
-       * @param {String} modelType
-       * @param callback
-       */
-      function processPolymorphicType(modelType, callback) {
-        var typeFilter = {where: {}};
-        utils.mergeQuery(typeFilter, filter);
-        var targetIds = targetIdsByType[modelType];
-        typeFilter.where[relation.keyTo] = {
-          inq: uniq(targetIds)
-        };
-        var Model = lookupModel(relation.modelFrom.dataSource.modelBuilder.
-          models, modelType);
-        if (!Model) {
-          callback(new Error('Discriminator type "' + modelType +
-            ' specified but no model exists with such name'));
-          return;
-        }
-        relation.applyScope(null, typeFilter);
-        Model.find(typeFilter, options, targetFetchHandler);
-        /**
-         * Process fetched related objects
-         * @param err
-         * @param {Array<Model>} targets
-         * @returns {*}
-         */
-        function targetFetchHandler(err, targets) {
-          if (err) {
-            return callback(err);
-          }
-          var tasks = [];
-
-          //simultaneously process subIncludes
-          if (subInclude && targets) {
-            tasks.push(function subIncludesTask(next) {
-              Model.include(targets, subInclude, options, next);
-            });
-          }
-          //process each target object
-          tasks.push(targetLinkingTask);
-          function targetLinkingTask(next) {
-            var targetObjsMap = targetObjMapByType[modelType];
-            async.each(targets, linkOneToMany, next);
-            function linkOneToMany(target, next) {
-              var objList = targetObjsMap[target[relation.keyTo].toString()];
-              async.each(objList, function (obj, next) {
-                if (!obj) return next();
-                obj.__cachedRelations[relationName] = target;
-                processTargetObj(obj, next);
-              }, next);
-            }
-          }
-
-          execTasksWithInterLeave(tasks, callback);
-        }
-      }
-    }
-
-
-    /**
-     * Handle Inclusion of Polymorphic HasOne relation
-     * @param callback
-     */
-    function includePolymorphicHasOne(callback) {
-      var sourceIds = [];
-      //Map for Indexing objects by their id for faster retrieval
-      var objIdMap = {};
-      for (var i = 0; i < objs.length; i++) {
-        var obj = objs[i];
-        // one-to-one: foreign key reference is modelTo -> modelFrom.
-        // use modelFrom.keyFrom in where filter later
-        var sourceId = obj[relation.keyFrom];
-        if (sourceId) {
-          sourceIds.push(sourceId);
-          objIdMap[sourceId.toString()] = obj;
-        }
-        // sourceId can be null. but cache empty data as result
-        defineCachedRelations(obj);
-        obj.__cachedRelations[relationName] = null;
-      }
-      filter.where[relation.keyTo] = {
-        inq: uniq(sourceIds)
-      };
-      relation.applyScope(null, filter);
-      relation.modelTo.find(filter, options, targetFetchHandler);
-      /**
-       * Process fetched related objects
-       * @param err
-       * @param {Array<Model>} targets
-       * @returns {*}
-       */
-      function targetFetchHandler(err, targets) {
-        if (err) {
-          return callback(err);
-        }
-        var tasks = [];
-        //simultaneously process subIncludes
-        if (subInclude && targets) {
-          tasks.push(function subIncludesTask(next) {
-            relation.modelTo.include(targets, subInclude, options, next);
-          });
-        }
-        //process each target object
-        tasks.push(targetLinkingTask);
-        function targetLinkingTask(next) {
-          async.each(targets, linkOneToOne, next);
-          function linkOneToOne(target, next) {
-            var sourceId = target[relation.keyTo];
-            if (!sourceId) return next();
-            var obj = objIdMap[sourceId.toString()];
-            if (!obj) return next();
-            obj.__cachedRelations[relationName] = target;
-            processTargetObj(obj, next);
-          }
-        }
-
-        execTasksWithInterLeave(tasks, callback);
-      }
-    }
-
-    /**
-     * Handle Inclusion of BelongsTo/HasOne relation
-     * @param callback
-     */
-    function includeOneToOne(callback) {
-      var targetIds = [];
-      var objTargetIdMap = {};
-      for (var i = 0; i < objs.length; i++) {
-        var obj = objs[i];
-        if (relation.type === 'belongsTo') {
-          if (obj[relation.keyFrom] === null ||
-            obj[relation.keyFrom] === undefined) {
-            defineCachedRelations(obj);
-            obj.__cachedRelations[relationName] = null;
-            continue;
-          }
-        }
-        var targetId = obj[relation.keyFrom];
-        if (targetId) {
-          targetIds.push(targetId);
-          var targetIdStr = targetId.toString();
-          objTargetIdMap[targetIdStr] = objTargetIdMap[targetIdStr] || [];
-          objTargetIdMap[targetIdStr].push(obj);
-        }
-        defineCachedRelations(obj);
-        obj.__cachedRelations[relationName] = null;
-      }
-      filter.where[relation.keyTo] = {
-        inq: uniq(targetIds)
-      };
-      relation.applyScope(null, filter);
-      relation.modelTo.find(filter, options, targetFetchHandler);
-      /**
-       * Process fetched related objects
-       * @param err
-       * @param {Array<Model>} targets
-       * @returns {*}
-       */
-      function targetFetchHandler(err, targets) {
-        if (err) {
-          return callback(err);
-        }
-        var tasks = [];
-        //simultaneously process subIncludes
-        if (subInclude && targets) {
-          tasks.push(function subIncludesTask(next) {
-            relation.modelTo.include(targets, subInclude, options, next);
-          });
-        }
-        //process each target object
-        tasks.push(targetLinkingTask);
-        function targetLinkingTask(next) {
-          async.each(targets, linkOneToMany, next);
-          function linkOneToMany(target, next) {
-            var targetId = target[relation.keyTo];
-            var objList = objTargetIdMap[targetId.toString()];
-            async.each(objList, function (obj, next) {
-              if (!obj) return next();
-              obj.__cachedRelations[relationName] = target;
-              processTargetObj(obj, next);
-            }, next);
-          }
-        }
-
-        execTasksWithInterLeave(tasks, callback);
-      }
-    }
-
-
-    /**
-     * Handle Inclusion of EmbedsMany/EmbedsManyWithBelongsTo/EmbedsOne
-     * Relations. Since Embedded docs are part of parents, no need to make
-     * db calls. Let the related function be called for each object to fetch
-     * the results from cache.
-     *
-     * TODO: Optimize EmbedsManyWithBelongsTo relation DB Calls
-     * @param callback
-     */
-    function includeEmbeds(callback) {
-      async.each(objs, function (obj, next) {
-        processTargetObj(obj, next);
-      }, callback);
-    }
-
-    /**
-     * Process Each Model Object and make sure specified relations are included
-     * @param {Model} obj - Single Mode object for which inclusion is needed
-     * @param callback
-     * @returns {*}
-     */
-    function processTargetObj(obj, callback) {
-
-      var isInst = obj instanceof self;
-
-      // Calling the relation method on the instance
-      if (relation.type === 'belongsTo') {
-        // If the belongsTo relation doesn't have an owner
-        if (obj[relation.keyFrom] === null || obj[relation.keyFrom] === undefined) {
-          defineCachedRelations(obj);
-          // Set to null if the owner doesn't exist
-          obj.__cachedRelations[relationName] = null;
-          if (isInst) {
-            obj.__data[relationName] = null;
-          } else {
-            obj[relationName] = null;
-          }
-          return callback();
-        }
-      }
-      /**
-       * Sets the related objects as a property of Parent Object
-       * @param {Array<Model>|Model|null} result - Related Object/Objects
-       * @param cb
-       */
-      function setIncludeData(result, cb) {
-        if (isInst) {
-          if (Array.isArray(result) && !(result instanceof List)) {
-            result = new List(result, relation.modelTo);
-          }
-          obj.__data[relationName] = result;
-          obj.setStrict(false);
-        } else {
-          obj[relationName] = result;
-        }
-        cb(null, result);
-      }
-
-      //obj.__cachedRelations[relationName] can be null if no data was returned
-      if (obj.__cachedRelations &&
-        obj.__cachedRelations[relationName] !== undefined) {
-        return setIncludeData(obj.__cachedRelations[relationName],
-          callback);
-      }
-
-      var inst = (obj instanceof self) ? obj : new self(obj);
-
-      //If related objects are not cached by include Handlers, directly call
-      //related accessor function even though it is not very efficient
-      var related; // relation accessor function
-
-      if ((relation.multiple || relation.type === 'belongsTo') && scope) {
-        var includeScope = {};
-        var filter = scope.conditions();
-
-        // make sure not to miss any fields for sub includes
-        if (filter.fields && Array.isArray(subInclude) && relation.modelTo.relations) {
-          includeScope.fields = [];
-          subInclude.forEach(function(name) {
-            var rel = relation.modelTo.relations[name];
-            if (rel && rel.type === 'belongsTo') {
-              includeScope.fields.push(rel.keyFrom);
-            }
-          });
-        }
-
-        utils.mergeQuery(filter, includeScope, {fields: false});
-
-        related = inst[relationName].bind(inst, filter);
-      } else {
-        related = inst[relationName].bind(inst, undefined);
-      }
-
-      related(options, function (err, result) {
-        if (err) {
-          return callback(err);
-        } else {
-
-          defineCachedRelations(obj);
-          obj.__cachedRelations[relationName] = result;
-
-          return setIncludeData(result, callback);
-        }
-      });
-    }
-
-  }
-};
-
-
-}).call(this,require('_process'))
-},{"./include_utils":528,"./list":531,"./utils":542,"_process":279,"async":544}],528:[function(require,module,exports){
-arguments[4][193][0].apply(exports,arguments)
-},{"dup":193}],529:[function(require,module,exports){
-arguments[4][194][0].apply(exports,arguments)
-},{"dup":194}],530:[function(require,module,exports){
-arguments[4][195][0].apply(exports,arguments)
-},{"dup":195,"util":396}],531:[function(require,module,exports){
-arguments[4][196][0].apply(exports,arguments)
-},{"./types":541,"dup":196,"util":396}],532:[function(require,module,exports){
-arguments[4][197][0].apply(exports,arguments)
-},{"./model.js":535,"assert":22,"debug":417,"dup":197}],533:[function(require,module,exports){
-arguments[4][198][0].apply(exports,arguments)
-},{"./introspection":529,"./list.js":531,"./mixins":532,"./model-definition.js":534,"./model.js":535,"./types":541,"./utils":542,"assert":22,"depd":521,"dup":198,"events":111,"inflection":459,"util":396}],534:[function(require,module,exports){
-arguments[4][199][0].apply(exports,arguments)
-},{"./model":535,"./model-builder":533,"./types":541,"assert":22,"dup":199,"events":111,"traverse":667,"util":396}],535:[function(require,module,exports){
-arguments[4][200][0].apply(exports,arguments)
-},{"./hooks":526,"./jutil":530,"./list":531,"./observer":536,"./utils":542,"./validations":543,"_process":279,"async":544,"depd":521,"dup":200,"node-uuid":594,"util":396}],536:[function(require,module,exports){
-arguments[4][201][0].apply(exports,arguments)
-},{"./utils":542,"async":544,"dup":201}],537:[function(require,module,exports){
-arguments[4][202][0].apply(exports,arguments)
-},{"./connectors/memory":522,"./model.js":535,"./scope.js":539,"./utils":542,"./validations.js":543,"_process":279,"assert":22,"async":544,"debug":417,"dup":202,"inflection":459,"util":396}],538:[function(require,module,exports){
-arguments[4][203][0].apply(exports,arguments)
-},{"./relation-definition":537,"dup":203}],539:[function(require,module,exports){
-arguments[4][204][0].apply(exports,arguments)
-},{"./model.js":535,"./utils":542,"dup":204,"inflection":459}],540:[function(require,module,exports){
-arguments[4][205][0].apply(exports,arguments)
-},{"./jutil":530,"./observer":536,"./utils":542,"_process":279,"debug":417,"dup":205,"loopback-connector":514,"node-uuid":594}],541:[function(require,module,exports){
-arguments[4][206][0].apply(exports,arguments)
-},{"./geo":525,"buffer":58,"dup":206}],542:[function(require,module,exports){
-arguments[4][207][0].apply(exports,arguments)
-},{"_process":279,"assert":22,"dup":207,"qs":545,"traverse":667,"url":392}],543:[function(require,module,exports){
-arguments[4][208][0].apply(exports,arguments)
-},{"_process":279,"dup":208,"util":396}],544:[function(require,module,exports){
-arguments[4][209][0].apply(exports,arguments)
-},{"_process":279,"dup":209}],545:[function(require,module,exports){
-arguments[4][210][0].apply(exports,arguments)
-},{"./lib/":546,"dup":210}],546:[function(require,module,exports){
-arguments[4][211][0].apply(exports,arguments)
-},{"./parse":547,"./stringify":548,"dup":211}],547:[function(require,module,exports){
-arguments[4][212][0].apply(exports,arguments)
-},{"./utils":549,"dup":212}],548:[function(require,module,exports){
-arguments[4][213][0].apply(exports,arguments)
-},{"./utils":549,"dup":213}],549:[function(require,module,exports){
-arguments[4][214][0].apply(exports,arguments)
-},{"dup":214}],550:[function(require,module,exports){
-module.exports={
-  "_args": [
-    [
-      "loopback-datasource-juggler@^2.39.0",
-      "C:\\Users\\wsteiner.LOGICX\\Documents\\ipp-project\\apps\\prototyping\\Prototypes\\loopback-full-stack-tenancy"
-    ]
-  ],
-  "_from": "loopback-datasource-juggler@>=2.39.0 <3.0.0",
-  "_id": "loopback-datasource-juggler@2.44.0",
-  "_inCache": true,
-  "_location": "/loopback-datasource-juggler",
-  "_nodeVersion": "0.10.40",
-  "_npmUser": {
-    "email": "enjoyjava@gmail.com",
-    "name": "rfeng"
-  },
-  "_npmVersion": "3.5.1",
-  "_phantomChildren": {},
-  "_requested": {
-    "name": "loopback-datasource-juggler",
-    "raw": "loopback-datasource-juggler@^2.39.0",
-    "rawSpec": "^2.39.0",
-    "scope": null,
-    "spec": ">=2.39.0 <3.0.0",
-    "type": "range"
-  },
-  "_requiredBy": [
-    "/",
-    "/loopback-connector-remote"
-  ],
-  "_resolved": "http://logicxklubuild:4873/loopback-datasource-juggler/-/loopback-datasource-juggler-2.44.0.tgz",
-  "_shasum": "045b312f364b6f7ec2d6c5452acd6b8350b13a24",
-  "_shrinkwrap": null,
-  "_spec": "loopback-datasource-juggler@^2.39.0",
-  "_where": "C:\\Users\\wsteiner.LOGICX\\Documents\\ipp-project\\apps\\prototyping\\Prototypes\\loopback-full-stack-tenancy",
-  "browser": {
-    "depd": "./lib/browser.depd.js"
-  },
-  "bugs": {
-    "url": "https://github.com/strongloop/loopback-datasource-juggler/issues"
-  },
-  "dependencies": {
-    "async": "~1.0.0",
-    "debug": "^2.1.1",
-    "depd": "^1.0.0",
-    "inflection": "^1.6.0",
-    "loopback-connector": "^2.1.0",
-    "node-uuid": "^1.4.2",
-    "qs": "^3.1.0",
-    "traverse": "^0.6.6"
-  },
-  "description": "LoopBack DataSoure Juggler",
-  "devDependencies": {
-    "bluebird": "^2.9.9",
-    "mocha": "^2.1.0",
-    "should": "^5.0.0"
-  },
-  "directories": {},
-  "dist": {
-    "shasum": "045b312f364b6f7ec2d6c5452acd6b8350b13a24",
-    "tarball": "http://logicxklubuild:4873/loopback-datasource-juggler/-/loopback-datasource-juggler-2.44.0.tgz"
-  },
-  "engines": [
-    "node >= 0.6"
-  ],
-  "gitHead": "1e9bbd27873077ef374ea5487121a70173757364",
-  "homepage": "https://github.com/strongloop/loopback-datasource-juggler#readme",
-  "installable": true,
-  "keywords": [
-    "Connector",
-    "DataSource",
-    "Database",
-    "Juggler",
-    "LoopBack",
-    "ORM",
-    "StrongLoop"
-  ],
-  "license": "MIT",
-  "main": "index.js",
-  "maintainers": [
-    {
-      "name": "rfeng",
-      "email": "enjoyjava@gmail.com"
-    },
-    {
-      "name": "ritch",
-      "email": "skawful@gmail.com"
-    },
-    {
-      "name": "schoonology",
-      "email": "michael.r.schoonmaker@gmail.com"
-    },
-    {
-      "name": "strongloop",
-      "email": "callback@strongloop.com"
-    },
-    {
-      "name": "bajtos",
-      "email": "miro.bajtos@gmail.com"
-    }
-  ],
-  "name": "loopback-datasource-juggler",
-  "optionalDependencies": {},
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/strongloop/loopback-datasource-juggler.git"
-  },
-  "scripts": {
-    "clean": "make clean",
-    "help": "make help",
-    "refresh": "make refresh",
-    "test": "make test"
-  },
-  "version": "2.44.0"
-}
-
-},{}],551:[function(require,module,exports){
-arguments[4][216][0].apply(exports,arguments)
-},{"dup":216}],552:[function(require,module,exports){
-arguments[4][217][0].apply(exports,arguments)
-},{"dup":217}],553:[function(require,module,exports){
-(function (process,Buffer){
-/*!
- * Module Dependencies.
- */
-
-var loopback = require('../../lib/loopback');
-var assert = require('assert');
-var uid = require('uid2');
-var DEFAULT_TOKEN_LEN = 64;
-
-/**
- * Token based authentication and access control.
- *
- * **Default ACLs**
- *
- *  - DENY EVERYONE `*`
- *  - ALLOW EVERYONE create
- *
- * @property {String} id Generated token ID.
- * @property {Number} ttl Time to live in seconds, 2 weeks by default.
- * @property {Date} created When the token was created.
- * @property {Object} settings Extends the `Model.settings` object.
- * @property {Number} settings.accessTokenIdLength Length of the base64-encoded string access token. Default value is 64.
- * Increase the length for a more secure access token.
- *
- * @class AccessToken
- * @inherits {PersistedModel}
- */
-
-module.exports = function(AccessToken) {
-
-  // Workaround for https://github.com/strongloop/loopback/issues/292
-  AccessToken.definition.rawProperties.created.default =
-  AccessToken.definition.properties.created.default = function() {
-    return new Date();
-  };
-
-  /**
-   * Anonymous Token
-   *
-   * ```js
-   * assert(AccessToken.ANONYMOUS.id === '$anonymous');
-   * ```
-   */
-
-  AccessToken.ANONYMOUS = new AccessToken({id: '$anonymous'});
-
-  /**
-   * Create a cryptographically random access token id.
-   *
-   * @callback {Function} callback
-   * @param {Error} err
-   * @param {String} token
-   */
-
-  AccessToken.createAccessTokenId = function(fn) {
-    uid(this.settings.accessTokenIdLength || DEFAULT_TOKEN_LEN, function(err, guid) {
-      if (err) {
-        fn(err);
-      } else {
-        fn(null, guid);
-      }
-    });
-  };
-
-  /*!
-   * Hook to create accessToken id.
-   */
-  AccessToken.observe('before save', function(ctx, next) {
-    if (!ctx.instance || ctx.instance.id) {
-      // We are running a partial update or the instance already has an id
-      return next();
-    }
-
-    AccessToken.createAccessTokenId(function(err, id) {
-      if (err) return next(err);
-      ctx.instance.id = id;
-      next();
-    });
-  });
-
-  /**
-   * Find a token for the given `ServerRequest`.
-   *
-   * @param {ServerRequest} req
-   * @param {Object} [options] Options for finding the token
-   * @callback {Function} callback
-   * @param {Error} err
-   * @param {AccessToken} token
-   */
-
-  AccessToken.findForRequest = function(req, options, cb) {
-    if (cb === undefined && typeof options === 'function') {
-      cb = options;
-      options = {};
-    }
-
-    var id = tokenIdForRequest(req, options);
-
-    if (id) {
-      this.findById(id, function(err, token) {
-        if (err) {
-          cb(err);
-        } else if (token) {
-          token.validate(function(err, isValid) {
-            if (err) {
-              cb(err);
-            } else if (isValid) {
-              cb(null, token);
-            } else {
-              var e = new Error('Invalid Access Token');
-              e.status = e.statusCode = 401;
-              e.code = 'INVALID_TOKEN';
-              cb(e);
-            }
-          });
-        } else {
-          cb();
-        }
-      });
-    } else {
-      process.nextTick(function() {
-        cb();
-      });
-    }
-  };
-
-  /**
-   * Validate the token.
-   *
-   * @callback {Function} callback
-   * @param {Error} err
-   * @param {Boolean} isValid
-   */
-
-  AccessToken.prototype.validate = function(cb) {
-    try {
-      assert(
-          this.created && typeof this.created.getTime === 'function',
-        'token.created must be a valid Date'
-      );
-      assert(this.ttl !== 0, 'token.ttl must be not be 0');
-      assert(this.ttl, 'token.ttl must exist');
-      assert(this.ttl >= -1, 'token.ttl must be >= -1');
-
-      var now = Date.now();
-      var created = this.created.getTime();
-      var elapsedSeconds = (now - created) / 1000;
-      var secondsToLive = this.ttl;
-      var isValid = elapsedSeconds < secondsToLive;
-
-      if (isValid) {
-        cb(null, isValid);
-      } else {
-        this.destroy(function(err) {
-          cb(err, isValid);
-        });
-      }
-    } catch (e) {
-      cb(e);
-    }
-  };
-
-  function tokenIdForRequest(req, options) {
-    var params = options.params || [];
-    var headers = options.headers || [];
-    var cookies = options.cookies || [];
-    var i = 0;
-    var length;
-    var id;
-
-    // https://github.com/strongloop/loopback/issues/1326
-    if (options.searchDefaultTokenKeys !== false) {
-      params = params.concat(['access_token']);
-      headers = headers.concat(['X-Access-Token', 'authorization']);
-      cookies = cookies.concat(['access_token', 'authorization']);
-    }
-
-    for (length = params.length; i < length; i++) {
-      var param = params[i];
-      // replacement for deprecated req.param()
-      id = req.params && req.params[param] !== undefined ? req.params[param] :
-        req.body && req.body[param] !== undefined ? req.body[param] :
-        req.query && req.query[param] !== undefined ? req.query[param] :
-        undefined;
-
-      if (typeof id === 'string') {
-        return id;
-      }
-    }
-
-    for (i = 0, length = headers.length; i < length; i++) {
-      id = req.header(headers[i]);
-
-      if (typeof id === 'string') {
-        // Add support for oAuth 2.0 bearer token
-        // http://tools.ietf.org/html/rfc6750
-        if (id.indexOf('Bearer ') === 0) {
-          id = id.substring(7);
-          // Decode from base64
-          var buf = new Buffer(id, 'base64');
-          id = buf.toString('utf8');
-        } else if (/^Basic /i.test(id)) {
-          id = id.substring(6);
-          id = (new Buffer(id, 'base64')).toString('utf8');
-          // The spec says the string is user:pass, so if we see both parts
-          // we will assume the longer of the two is the token, so we will
-          // extract "a2b2c3" from:
-          //   "a2b2c3"
-          //   "a2b2c3:"   (curl http://a2b2c3@localhost:3000/)
-          //   "token:a2b2c3" (curl http://token:a2b2c3@localhost:3000/)
-          //   ":a2b2c3"
-          var parts = /^([^:]*):(.*)$/.exec(id);
-          if (parts) {
-            id = parts[2].length > parts[1].length ? parts[2] : parts[1];
-          }
-        }
-        return id;
-      }
-    }
-
-    if (req.signedCookies) {
-      for (i = 0, length = cookies.length; i < length; i++) {
-        id = req.signedCookies[cookies[i]];
-
-        if (typeof id === 'string') {
-          return id;
-        }
-      }
-    }
-    return null;
-  }
-};
-
-}).call(this,require('_process'),require("buffer").Buffer)
-},{"../../lib/loopback":581,"_process":279,"assert":22,"buffer":58,"uid2":670}],554:[function(require,module,exports){
-arguments[4][218][0].apply(exports,arguments)
-},{"dup":218}],555:[function(require,module,exports){
-(function (process){
-/*!
- Schema ACL options
-
- Object level permissions, for example, an album owned by a user
-
- Factors to be authorized against:
-
- * model name: Album
- * model instance properties: userId of the album, friends, shared
- * methods
- * app and/or user ids/roles
- ** loggedIn
- ** roles
- ** userId
- ** appId
- ** none
- ** everyone
- ** relations: owner/friend/granted
-
- Class level permissions, for example, Album
- * model name: Album
- * methods
-
- URL/Route level permissions
- * url pattern
- * application id
- * ip addresses
- * http headers
-
- Map to oAuth 2.0 scopes
-
- */
-
-var loopback = require('../../lib/loopback');
-var async = require('async');
-var assert = require('assert');
-var debug = require('debug')('loopback:security:acl');
-
-var ctx = require('../../lib/access-context');
-var AccessContext = ctx.AccessContext;
-var Principal = ctx.Principal;
-var AccessRequest = ctx.AccessRequest;
-
-var Role = loopback.Role;
-assert(Role, 'Role model must be defined before ACL model');
-
-/**
- * A Model for access control meta data.
- *
- * System grants permissions to principals (users/applications, can be grouped
- * into roles).
- *
- * Protected resource: the model data and operations
- * (model/property/method/relation/…)
- *
- * For a given principal, such as client application and/or user, is it allowed
- * to access (read/write/execute)
- * the protected resource?
- *
- * @header ACL
- * @property {String} model Name of the model.
- * @property {String} property Name of the property, method, scope, or relation.
- * @property {String} accessType Type of access being granted: one of READ, WRITE, or EXECUTE.
- * @property {String} permission Type of permission granted. One of:
- *
- *  - ALARM: Generate an alarm, in a system-dependent way, the access specified in the permissions component of the ACL entry.
- *  - ALLOW: Explicitly grants access to the resource.
- *  - AUDIT: Log, in a system-dependent way, the access specified in the permissions component of the ACL entry.
- *  - DENY: Explicitly denies access to the resource.
- * @property {String} principalType Type of the principal; one of: Application, Use, Role.
- * @property {String} principalId ID of the principal - such as appId, userId or roleId.
- * @property {Object} settings Extends the `Model.settings` object.
- * @property {String} settings.defaultPermission Default permission setting: ALLOW, DENY, ALARM, or AUDIT. Default is ALLOW.
- * Set to DENY to prohibit all API access by default.
- *
- * @class ACL
- * @inherits PersistedModel
- */
-
-module.exports = function(ACL) {
-
-  ACL.ALL = AccessContext.ALL;
-
-  ACL.DEFAULT = AccessContext.DEFAULT; // Not specified
-  ACL.ALLOW = AccessContext.ALLOW; // Allow
-  ACL.ALARM = AccessContext.ALARM; // Warn - send an alarm
-  ACL.AUDIT = AccessContext.AUDIT; // Audit - record the access
-  ACL.DENY = AccessContext.DENY; // Deny
-
-  ACL.READ = AccessContext.READ; // Read operation
-  ACL.REPLICATE = AccessContext.REPLICATE; // Replicate (pull) changes
-  ACL.WRITE = AccessContext.WRITE; // Write operation
-  ACL.EXECUTE = AccessContext.EXECUTE; // Execute operation
-
-  ACL.USER = Principal.USER;
-  ACL.APP = ACL.APPLICATION = Principal.APPLICATION;
-  ACL.ROLE = Principal.ROLE;
-  ACL.SCOPE = Principal.SCOPE;
-
-  /**
-   * Calculate the matching score for the given rule and request
-   * @param {ACL} rule The ACL entry
-   * @param {AccessRequest} req The request
-   * @returns {Number}
-   */
-  ACL.getMatchingScore = function getMatchingScore(rule, req) {
-    var props = ['model', 'property', 'accessType'];
-    var score = 0;
-
-    for (var i = 0; i < props.length; i++) {
-      // Shift the score by 4 for each of the properties as the weight
-      score = score * 4;
-      var ruleValue = rule[props[i]] || ACL.ALL;
-      var requestedValue = req[props[i]] || ACL.ALL;
-      var isMatchingMethodName = props[i] === 'property' && req.methodNames.indexOf(ruleValue) !== -1;
-
-      var isMatchingAccessType = ruleValue === requestedValue;
-      if (props[i] === 'accessType' && !isMatchingAccessType) {
-        switch (ruleValue) {
-          case ACL.EXECUTE:
-            // EXECUTE should match READ, REPLICATE and WRITE
-            isMatchingAccessType = true;
-            break;
-          case ACL.WRITE:
-            // WRITE should match REPLICATE too
-            isMatchingAccessType = requestedValue === ACL.REPLICATE;
-            break;
-        }
-      }
-
-      if (isMatchingMethodName || isMatchingAccessType) {
-        // Exact match
-        score += 3;
-      } else if (ruleValue === ACL.ALL) {
-        // Wildcard match
-        score += 2;
-      } else if (requestedValue === ACL.ALL) {
-        score += 1;
-      } else {
-        // Doesn't match at all
-        return -1;
-      }
-    }
-
-    // Weigh against the principal type into 4 levels
-    // - user level (explicitly allow/deny a given user)
-    // - app level (explicitly allow/deny a given app)
-    // - role level (role based authorization)
-    // - other
-    // user > app > role > ...
-    score = score * 4;
-    switch (rule.principalType) {
-      case ACL.USER:
-        score += 4;
-        break;
-      case ACL.APP:
-        score += 3;
-        break;
-      case ACL.ROLE:
-        score += 2;
-        break;
-      default:
-        score += 1;
-    }
-
-    // Weigh against the roles
-    // everyone < authenticated/unauthenticated < related < owner < ...
-    score = score * 8;
-    if (rule.principalType === ACL.ROLE) {
-      switch (rule.principalId) {
-        case Role.OWNER:
-          score += 4;
-          break;
-        case Role.RELATED:
-          score += 3;
-          break;
-        case Role.AUTHENTICATED:
-        case Role.UNAUTHENTICATED:
-          score += 2;
-          break;
-        case Role.EVERYONE:
-          score += 1;
-          break;
-        default:
-          score += 5;
-      }
-    }
-    score = score * 4;
-    score += AccessContext.permissionOrder[rule.permission || ACL.ALLOW] - 1;
-    return score;
-  };
-
-  /**
-   * Get matching score for the given `AccessRequest`.
-   * @param {AccessRequest} req The request
-   * @returns {Number} score
-   */
-
-  ACL.prototype.score = function(req) {
-    return this.constructor.getMatchingScore(this, req);
-  };
-
-  /*!
-   * Resolve permission from the ACLs
-   * @param {Object[]) acls The list of ACLs
-   * @param {Object} req The request
-   * @returns {AccessRequest} result The effective ACL
-   */
-  ACL.resolvePermission = function resolvePermission(acls, req) {
-    if (!(req instanceof AccessRequest)) {
-      req = new AccessRequest(req);
-    }
-    // Sort by the matching score in descending order
-    acls = acls.sort(function(rule1, rule2) {
-      return ACL.getMatchingScore(rule2, req) - ACL.getMatchingScore(rule1, req);
-    });
-    var permission = ACL.DEFAULT;
-    var score = 0;
-
-    for (var i = 0; i < acls.length; i++) {
-      var candidate = acls[i];
-      score = ACL.getMatchingScore(candidate, req);
-      if (score < 0) {
-        // the highest scored ACL did not match
-        break;
-      }
-      if (!req.isWildcard()) {
-        // We should stop from the first match for non-wildcard
-        permission = candidate.permission;
-        break;
-      } else {
-        if (req.exactlyMatches(candidate)) {
-          permission = candidate.permission;
-          break;
-        }
-        // For wildcard match, find the strongest permission
-        var candidateOrder = AccessContext.permissionOrder[candidate.permission];
-        var permissionOrder = AccessContext.permissionOrder[permission];
-        if (candidateOrder > permissionOrder) {
-          permission = candidate.permission;
-        }
-      }
-    }
-
-    if (debug.enabled) {
-      debug('The following ACLs were searched: ');
-      acls.forEach(function(acl) {
-        acl.debug();
-        debug('with score:', acl.score(req));
-      });
-    }
-
-    var res = new AccessRequest(req.model, req.property, req.accessType,
-        permission || ACL.DEFAULT);
-    return res;
-  };
-
-  /*!
-   * Get the static ACLs from the model definition
-   * @param {String} model The model name
-   * @param {String} property The property/method/relation name
-   *
-   * @return {Object[]} An array of ACLs
-   */
-  ACL.getStaticACLs = function getStaticACLs(model, property) {
-    var modelClass = loopback.findModel(model);
-    var staticACLs = [];
-    if (modelClass && modelClass.settings.acls) {
-      modelClass.settings.acls.forEach(function(acl) {
-        var prop = acl.property;
-        // We support static ACL property with array of string values.
-        if (Array.isArray(prop) && prop.indexOf(property) >= 0)
-          prop = property;
-        if (!prop || prop === ACL.ALL || property === prop) {
-          staticACLs.push(new ACL({
-            model: model,
-            property: prop || ACL.ALL,
-            principalType: acl.principalType,
-            principalId: acl.principalId, // TODO: Should it be a name?
-            accessType: acl.accessType || ACL.ALL,
-            permission: acl.permission
-          }));
-        }
-      });
-    }
-    var prop = modelClass && (
-      // regular property
-      modelClass.definition.properties[property] ||
-      // relation/scope
-      (modelClass._scopeMeta && modelClass._scopeMeta[property]) ||
-      // static method
-      modelClass[property] ||
-      // prototype method
-      modelClass.prototype[property]);
-    if (prop && prop.acls) {
-      prop.acls.forEach(function(acl) {
-        staticACLs.push(new ACL({
-          model: modelClass.modelName,
-          property: property,
-          principalType: acl.principalType,
-          principalId: acl.principalId,
-          accessType: acl.accessType,
-          permission: acl.permission
-        }));
-      });
-    }
-    return staticACLs;
-  };
-
-  /**
-   * Check if the given principal is allowed to access the model/property
-   * @param {String} principalType The principal type.
-   * @param {String} principalId The principal ID.
-   * @param {String} model The model name.
-   * @param {String} property The property/method/relation name.
-   * @param {String} accessType The access type.
-   * @callback {Function} callback Callback function.
-   * @param {String|Error} err The error object
-   * @param {AccessRequest} result The access permission
-   */
-  ACL.checkPermission = function checkPermission(principalType, principalId,
-                                                 model, property, accessType,
-                                                 callback) {
-    if (principalId !== null && principalId !== undefined && (typeof principalId !== 'string')) {
-      principalId = principalId.toString();
-    }
-    property = property || ACL.ALL;
-    var propertyQuery = (property === ACL.ALL) ? undefined : {inq: [property, ACL.ALL]};
-    accessType = accessType || ACL.ALL;
-    var accessTypeQuery = (accessType === ACL.ALL) ? undefined : {inq: [accessType, ACL.ALL, ACL.EXECUTE]};
-
-    var req = new AccessRequest(model, property, accessType);
-
-    var acls = this.getStaticACLs(model, property);
-
-    var resolved = this.resolvePermission(acls, req);
-
-    if (resolved && resolved.permission === ACL.DENY) {
-      debug('Permission denied by statically resolved permission');
-      debug(' Resolved Permission: %j', resolved);
-      process.nextTick(function() {
-        if (callback) callback(null, resolved);
-      });
-      return;
-    }
-
-    var self = this;
-    this.find({where: {principalType: principalType, principalId: principalId,
-        model: model, property: propertyQuery, accessType: accessTypeQuery}},
-      function(err, dynACLs) {
-        if (err) {
-          if (callback) callback(err);
-          return;
-        }
-        acls = acls.concat(dynACLs);
-        resolved = self.resolvePermission(acls, req);
-        if (resolved && resolved.permission === ACL.DEFAULT) {
-          var modelClass = loopback.findModel(model);
-          resolved.permission = (modelClass && modelClass.settings.defaultPermission) || ACL.ALLOW;
-        }
-        if (callback) callback(null, resolved);
-      });
-  };
-
-  ACL.prototype.debug = function() {
-    if (debug.enabled) {
-      debug('---ACL---');
-      debug('model %s', this.model);
-      debug('property %s', this.property);
-      debug('principalType %s', this.principalType);
-      debug('principalId %s', this.principalId);
-      debug('accessType %s', this.accessType);
-      debug('permission %s', this.permission);
-    }
-  };
-
-  /**
-   * Check if the request has the permission to access.
-   * @options {Object} context See below.
-   * @property {Object[]} principals An array of principals.
-   * @property {String|Model} model The model name or model class.
-   * @property {*} id The model instance ID.
-   * @property {String} property The property/method/relation name.
-   * @property {String} accessType The access type:
-   *   READ, REPLICATE, WRITE, or EXECUTE.
-   * @param {Function} callback Callback function
-   */
-
-  ACL.checkAccessForContext = function(context, callback) {
-    var registry = this.registry;
-
-    if (!(context instanceof AccessContext)) {
-      context = new AccessContext(context);
-    }
-
-    var model = context.model;
-    var property = context.property;
-    var accessType = context.accessType;
-    var modelName = context.modelName;
-
-    var methodNames = context.methodNames;
-    var propertyQuery = (property === ACL.ALL) ? undefined : {inq: methodNames.concat([ACL.ALL])};
-
-    var accessTypeQuery = (accessType === ACL.ALL) ?
-      undefined :
-      (accessType === ACL.REPLICATE) ?
-        {inq: [ACL.REPLICATE, ACL.WRITE, ACL.ALL]} :
-        {inq: [accessType, ACL.ALL]};
-
-    var req = new AccessRequest(modelName, property, accessType, ACL.DEFAULT, methodNames);
-
-    var effectiveACLs = [];
-    var staticACLs = this.getStaticACLs(model.modelName, property);
-
-    var self = this;
-    var roleModel = registry.getModelByType(Role);
-    this.find({where: {model: model.modelName, property: propertyQuery,
-      accessType: accessTypeQuery}}, function(err, acls) {
-      if (err) {
-        if (callback) callback(err);
-        return;
-      }
-      var inRoleTasks = [];
-
-      acls = acls.concat(staticACLs);
-
-      acls.forEach(function(acl) {
-        // Check exact matches
-        for (var i = 0; i < context.principals.length; i++) {
-          var p = context.principals[i];
-          var typeMatch = p.type === acl.principalType;
-          var idMatch = String(p.id) === String(acl.principalId);
-          if (typeMatch && idMatch) {
-            effectiveACLs.push(acl);
-            return;
-          }
-        }
-
-        // Check role matches
-        if (acl.principalType === ACL.ROLE) {
-          inRoleTasks.push(function(done) {
-            roleModel.isInRole(acl.principalId, context,
-              function(err, inRole) {
-                if (!err && inRole) {
-                  effectiveACLs.push(acl);
-                }
-                done(err, acl);
-              });
-          });
-        }
-      });
-
-      async.parallel(inRoleTasks, function(err, results) {
-        if (err) {
-          if (callback) callback(err, null);
-          return;
-        }
-
-        var resolved = self.resolvePermission(effectiveACLs, req);
-        if (resolved && resolved.permission === ACL.DEFAULT) {
-          resolved.permission = (model && model.settings.defaultPermission) || ACL.ALLOW;
-        }
-        debug('---Resolved---');
-        resolved.debug();
-        if (callback) callback(null, resolved);
-      });
-    });
-  };
-
-  /**
-   * Check if the given access token can invoke the method
-   * @param {AccessToken} token The access token
-   * @param {String} model The model name
-   * @param {*} modelId The model id
-   * @param {String} method The method name
-   * @callback {Function} callback Callback function
-   * @param {String|Error} err The error object
-   * @param {Boolean} allowed is the request allowed
-   */
-  ACL.checkAccessForToken = function(token, model, modelId, method, callback) {
-    assert(token, 'Access token is required');
-
-    var context = new AccessContext({
-      accessToken: token,
-      model: model,
-      property: method,
-      method: method,
-      modelId: modelId
-    });
-
-    this.checkAccessForContext(context, function(err, access) {
-      if (err) {
-        if (callback) callback(err);
-        return;
-      }
-      if (callback) callback(null, access.permission !== ACL.DENY);
-    });
-  };
-
-  ACL.resolveRelatedModels = function() {
-    if (!this.roleModel) {
-      var reg = this.registry;
-      this.roleModel = reg.getModelByType(loopback.Role);
-      this.roleMappingModel = reg.getModelByType(loopback.RoleMapping);
-      this.userModel = reg.getModelByType(loopback.User);
-      this.applicationModel = reg.getModelByType(loopback.Application);
-    }
-  };
-
-  /**
-   * Resolve a principal by type/id
-   * @param {String} type Principal type - ROLE/APP/USER
-   * @param {String|Number} id Principal id or name
-   * @param {Function} cb Callback function
-   */
-  ACL.resolvePrincipal = function(type, id, cb) {
-    type = type || ACL.ROLE;
-    this.resolveRelatedModels();
-    switch (type) {
-      case ACL.ROLE:
-        this.roleModel.findOne({where: {or: [{name: id}, {id: id}]}}, cb);
-        break;
-      case ACL.USER:
-        this.userModel.findOne(
-          {where: {or: [{username: id}, {email: id}, {id: id}]}}, cb);
-        break;
-      case ACL.APP:
-        this.applicationModel.findOne(
-          {where: {or: [{name: id}, {email: id}, {id: id}]}}, cb);
-        break;
-      default:
-        process.nextTick(function() {
-          var err = new Error('Invalid principal type: ' + type);
-          err.statusCode = 400;
-          cb(err);
-        });
-    }
-  };
-
-  /**
-   * Check if the given principal is mapped to the role
-   * @param {String} principalType Principal type
-   * @param {String|*} principalId Principal id/name
-   * @param {String|*} role Role id/name
-   * @param {Function} cb Callback function
-   */
-  ACL.isMappedToRole = function(principalType, principalId, role, cb) {
-    var self = this;
-    this.resolvePrincipal(principalType, principalId,
-      function(err, principal) {
-        if (err) return cb(err);
-        if (principal != null) {
-          principalId = principal.id;
-        }
-        principalType = principalType || 'ROLE';
-        self.resolvePrincipal('ROLE', role, function(err, role) {
-          if (err || !role) return cb(err, role);
-          self.roleMappingModel.findOne({
-            where: {
-              roleId: role.id,
-              principalType: principalType,
-              principalId: String(principalId)
-            }
-          }, function(err, result) {
-            if (err) return cb(err);
-            return cb(null, !!result);
-          });
-        });
-      });
-  };
-};
-
-}).call(this,require('_process'))
-},{"../../lib/access-context":573,"../../lib/loopback":581,"_process":279,"assert":22,"async":409,"debug":417}],556:[function(require,module,exports){
-arguments[4][219][0].apply(exports,arguments)
-},{"dup":219}],557:[function(require,module,exports){
-arguments[4][220][0].apply(exports,arguments)
-},{"../../lib/utils":586,"assert":22,"crypto":72,"dup":220}],558:[function(require,module,exports){
-arguments[4][221][0].apply(exports,arguments)
-},{"dup":221}],559:[function(require,module,exports){
-arguments[4][222][0].apply(exports,arguments)
-},{"../../lib/loopback":581,"assert":22,"async":409,"canonical-json":413,"crypto":72,"debug":417,"depd":521,"dup":222}],560:[function(require,module,exports){
-arguments[4][223][0].apply(exports,arguments)
-},{"dup":223}],561:[function(require,module,exports){
-arguments[4][224][0].apply(exports,arguments)
-},{"assert":22,"dup":224}],562:[function(require,module,exports){
-arguments[4][225][0].apply(exports,arguments)
-},{"dup":225}],563:[function(require,module,exports){
-arguments[4][226][0].apply(exports,arguments)
-},{"dup":226}],564:[function(require,module,exports){
-arguments[4][227][0].apply(exports,arguments)
-},{"dup":227}],565:[function(require,module,exports){
-(function (process){
-var loopback = require('../../lib/loopback');
-
-/**
- * The `RoleMapping` model extends from the built in `loopback.Model` type.
- *
- * @property {String} id Generated ID.
- * @property {String} name Name of the role.
- * @property {String} Description Text description.
- *
- * @class RoleMapping
- * @inherits {PersistedModel}
- */
-
-module.exports = function(RoleMapping) {
-  // Principal types
-  RoleMapping.USER = 'USER';
-  RoleMapping.APP = RoleMapping.APPLICATION = 'APP';
-  RoleMapping.ROLE = 'ROLE';
-
-  RoleMapping.resolveRelatedModels = function() {
-    if (!this.userModel) {
-      var reg = this.registry;
-      this.roleModel = reg.getModelByType(loopback.Role);
-      this.userModel = reg.getModelByType(loopback.User);
-      this.applicationModel = reg.getModelByType(loopback.Application);
-    }
-  };
-
-  /**
-   * Get the application principal
-   * @callback {Function} callback
-   * @param {Error} err
-   * @param {Application} application
-   */
-  RoleMapping.prototype.application = function(callback) {
-    this.constructor.resolveRelatedModels();
-
-    if (this.principalType === RoleMapping.APPLICATION) {
-      var applicationModel = this.constructor.applicationModel;
-      applicationModel.findById(this.principalId, callback);
-    } else {
-      process.nextTick(function() {
-        if (callback) callback(null, null);
-      });
-    }
-  };
-
-  /**
-   * Get the user principal
-   * @callback {Function} callback
-   * @param {Error} err
-   * @param {User} user
-   */
-  RoleMapping.prototype.user = function(callback) {
-    this.constructor.resolveRelatedModels();
-    if (this.principalType === RoleMapping.USER) {
-      var userModel = this.constructor.userModel;
-      userModel.findById(this.principalId, callback);
-    } else {
-      process.nextTick(function() {
-        if (callback) callback(null, null);
-      });
-    }
-  };
-
-  /**
-   * Get the child role principal
-   * @callback {Function} callback
-   * @param {Error} err
-   * @param {User} childUser
-   */
-  RoleMapping.prototype.childRole = function(callback) {
-    this.constructor.resolveRelatedModels();
-
-    if (this.principalType === RoleMapping.ROLE) {
-      var roleModel = this.constructor.roleModel;
-      roleModel.findById(this.principalId, callback);
-    } else {
-      process.nextTick(function() {
-        if (callback) callback(null, null);
-      });
-    }
-  };
-};
-
-}).call(this,require('_process'))
-},{"../../lib/loopback":581,"_process":279}],566:[function(require,module,exports){
-arguments[4][228][0].apply(exports,arguments)
-},{"dup":228}],567:[function(require,module,exports){
-(function (process){
-var loopback = require('../../lib/loopback');
-var debug = require('debug')('loopback:security:role');
-var assert = require('assert');
-var async = require('async');
-
-var AccessContext = require('../../lib/access-context').AccessContext;
-
-var RoleMapping = loopback.RoleMapping;
-
-assert(RoleMapping, 'RoleMapping model must be defined before Role model');
-
-/**
- * The Role model
- * @class Role
- * @header Role object
- */
-module.exports = function(Role) {
-
-  // Workaround for https://github.com/strongloop/loopback/issues/292
-  Role.definition.rawProperties.created.default =
-    Role.definition.properties.created.default = function() {
-    return new Date();
-  };
-
-  // Workaround for https://github.com/strongloop/loopback/issues/292
-  Role.definition.rawProperties.modified.default =
-    Role.definition.properties.modified.default = function() {
-    return new Date();
-  };
-
-  Role.resolveRelatedModels = function() {
-    if (!this.userModel) {
-      var reg = this.registry;
-      this.roleMappingModel = reg.getModelByType(loopback.RoleMapping);
-      this.userModel = reg.getModelByType(loopback.User);
-      this.applicationModel = reg.getModelByType(loopback.Application);
-    }
-  };
-
-  // Set up the connection to users/applications/roles once the model
-  Role.once('dataSourceAttached', function(roleModel) {
-
-    ['users', 'applications', 'roles'].forEach(function(rel) {
-      /**
-       * Fetch all users assigned to this role
-       * @function Role.prototype#users
-       * @param {object} [query] query object passed to model find call
-       * @param  {Function} [callback]
-       */
-      /**
-       * Fetch all applications assigned to this role
-       * @function Role.prototype#applications
-       * @param {object} [query] query object passed to model find call
-       * @param  {Function} [callback]
-       */
-      /**
-       * Fetch all roles assigned to this role
-       * @function Role.prototype#roles
-       * @param {object} [query] query object passed to model find call
-       * @param {Function} [callback]
-       */
-      Role.prototype[rel] = function(query, callback) {
-        roleModel.resolveRelatedModels();
-        var relsToModels = {
-          users: roleModel.userModel,
-          applications: roleModel.applicationModel,
-          roles: roleModel
-        };
-
-        var ACL = loopback.ACL;
-        var relsToTypes = {
-          users: ACL.USER,
-          applications: ACL.APP,
-          roles: ACL.ROLE
-        };
-
-        var model = relsToModels[rel];
-        listByPrincipalType(model, relsToTypes[rel], query, callback);
-      };
-    });
-
-    /**
-     * Fetch all models assigned to this role
-     * @private
-     * @param {*} model model type to fetch
-     * @param {String} [principalType] principalType used in the rolemapping for model
-     * @param {object} [query] query object passed to model find call
-     * @param  {Function} [callback] callback function called with `(err, models)` arguments.
-     */
-    function listByPrincipalType(model, principalType, query, callback) {
-      if (callback === undefined) {
-        callback = query;
-        query = {};
-      }
-
-      roleModel.roleMappingModel.find({
-        where: {roleId: this.id, principalType: principalType}
-      }, function(err, mappings) {
-        var ids;
-        if (err) {
-          return callback(err);
-        }
-        ids = mappings.map(function(m) {
-          return m.principalId;
-        });
-        query.where = query.where || {};
-        query.where.id = {inq: ids};
-        model.find(query, function(err, models) {
-          callback(err, models);
-        });
-      });
-    }
-
-  });
-
-  // Special roles
-  Role.OWNER = '$owner'; // owner of the object
-  Role.RELATED = '$related'; // any User with a relationship to the object
-  Role.AUTHENTICATED = '$authenticated'; // authenticated user
-  Role.UNAUTHENTICATED = '$unauthenticated'; // authenticated user
-  Role.EVERYONE = '$everyone'; // everyone
-
-  /**
-   * Add custom handler for roles.
-   * @param {String} role Name of role.
-   * @param {Function} resolver Function that determines if a principal is in the specified role.
-   * Signature must be `function(role, context, callback)`
-   */
-  Role.registerResolver = function(role, resolver) {
-    if (!Role.resolvers) {
-      Role.resolvers = {};
-    }
-    Role.resolvers[role] = resolver;
-  };
-
-  Role.registerResolver(Role.OWNER, function(role, context, callback) {
-    if (!context || !context.model || !context.modelId) {
-      process.nextTick(function() {
-        if (callback) callback(null, false);
-      });
-      return;
-    }
-    var modelClass = context.model;
-    var modelId = context.modelId;
-    var userId = context.getUserId();
-    Role.isOwner(modelClass, modelId, userId, callback);
-  });
-
-  function isUserClass(modelClass) {
-    if (modelClass) {
-      return modelClass === loopback.User ||
-        modelClass.prototype instanceof loopback.User;
-    } else {
-      return false;
-    }
-  }
-
-  /*!
-   * Check if two user IDs matches
-   * @param {*} id1
-   * @param {*} id2
-   * @returns {boolean}
-   */
-  function matches(id1, id2) {
-    if (id1 === undefined || id1 === null || id1 === '' ||
-      id2 === undefined || id2 === null || id2 === '') {
-      return false;
-    }
-    // The id can be a MongoDB ObjectID
-    return id1 === id2 || id1.toString() === id2.toString();
-  }
-
-  /**
-   * Check if a given user ID is the owner the model instance.
-   * @param {Function} modelClass The model class
-   * @param {*} modelId The model ID
-   * @param {*} userId The user ID
-   * @param {Function} callback Callback function
-   */
-  Role.isOwner = function isOwner(modelClass, modelId, userId, callback) {
-    assert(modelClass, 'Model class is required');
-    debug('isOwner(): %s %s userId: %s', modelClass && modelClass.modelName, modelId, userId);
-    // No userId is present
-    if (!userId) {
-      process.nextTick(function() {
-        callback(null, false);
-      });
-      return;
-    }
-
-    // Is the modelClass User or a subclass of User?
-    if (isUserClass(modelClass)) {
-      process.nextTick(function() {
-        callback(null, matches(modelId, userId));
-      });
-      return;
-    }
-
-    modelClass.findById(modelId, function(err, inst) {
-      if (err || !inst) {
-        debug('Model not found for id %j', modelId);
-        if (callback) callback(err, false);
-        return;
-      }
-      debug('Model found: %j', inst);
-      var ownerId = inst.userId || inst.owner;
-      // Ensure ownerId exists and is not a function/relation
-      if (ownerId && 'function' !== typeof ownerId) {
-        if (callback) callback(null, matches(ownerId, userId));
-        return;
-      } else {
-        // Try to follow belongsTo
-        for (var r in modelClass.relations) {
-          var rel = modelClass.relations[r];
-          if (rel.type === 'belongsTo' && isUserClass(rel.modelTo)) {
-            debug('Checking relation %s to %s: %j', r, rel.modelTo.modelName, rel);
-            inst[r](processRelatedUser);
-            return;
-          }
-        }
-        debug('No matching belongsTo relation found for model %j and user: %j', modelId, userId);
-        if (callback) callback(null, false);
-      }
-
-      function processRelatedUser(err, user) {
-        if (!err && user) {
-          debug('User found: %j', user.id);
-          if (callback) callback(null, matches(user.id, userId));
-        } else {
-          if (callback) callback(err, false);
-        }
-      }
-    });
-  };
-
-  Role.registerResolver(Role.AUTHENTICATED, function(role, context, callback) {
-    if (!context) {
-      process.nextTick(function() {
-        if (callback) callback(null, false);
-      });
-      return;
-    }
-    Role.isAuthenticated(context, callback);
-  });
-
-  /**
-   * Check if the user ID is authenticated
-   * @param {Object} context The security context.
-   *
-   * @callback {Function} callback Callback function.
-   * @param {Error} err Error object.
-   * @param {Boolean} isAuthenticated True if the user is authenticated.
-   */
-  Role.isAuthenticated = function isAuthenticated(context, callback) {
-    process.nextTick(function() {
-      if (callback) callback(null, context.isAuthenticated());
-    });
-  };
-
-  Role.registerResolver(Role.UNAUTHENTICATED, function(role, context, callback) {
-    process.nextTick(function() {
-      if (callback) callback(null, !context || !context.isAuthenticated());
-    });
-  });
-
-  Role.registerResolver(Role.EVERYONE, function(role, context, callback) {
-    process.nextTick(function() {
-      if (callback) callback(null, true); // Always true
-    });
-  });
-
-  /**
-   * Check if a given principal is in the specified role.
-   *
-   * @param {String} role The role name.
-   * @param {Object} context The context object.
-   *
-   * @callback {Function} callback Callback function.
-   * @param {Error} err Error object.
-   * @param {Boolean} isInRole True if the principal is in the specified role.
-   */
-  Role.isInRole = function(role, context, callback) {
-    if (!(context instanceof AccessContext)) {
-      context = new AccessContext(context);
-    }
-
-    this.resolveRelatedModels();
-
-    debug('isInRole(): %s', role);
-    context.debug();
-
-    var resolver = Role.resolvers[role];
-    if (resolver) {
-      debug('Custom resolver found for role %s', role);
-      resolver(role, context, callback);
-      return;
-    }
-
-    if (context.principals.length === 0) {
-      debug('isInRole() returns: false');
-      process.nextTick(function() {
-        if (callback) callback(null, false);
-      });
-      return;
-    }
-
-    var inRole = context.principals.some(function(p) {
-
-      var principalType = p.type || undefined;
-      var principalId = p.id || undefined;
-
-      // Check if it's the same role
-      return principalType === RoleMapping.ROLE && principalId === role;
-    });
-
-    if (inRole) {
-      debug('isInRole() returns: %j', inRole);
-      process.nextTick(function() {
-        if (callback) callback(null, true);
-      });
-      return;
-    }
-
-    var roleMappingModel = this.roleMappingModel;
-    this.findOne({where: {name: role}}, function(err, result) {
-      if (err) {
-        if (callback) callback(err);
-        return;
-      }
-      if (!result) {
-        if (callback) callback(null, false);
-        return;
-      }
-      debug('Role found: %j', result);
-
-      // Iterate through the list of principals
-      async.some(context.principals, function(p, done) {
-        var principalType = p.type || undefined;
-        var principalId = p.id || undefined;
-        var roleId = result.id.toString();
-
-        if (principalId !== null && principalId !== undefined && (typeof principalId !== 'string')) {
-          principalId = principalId.toString();
-        }
-
-        if (principalType && principalId) {
-          roleMappingModel.findOne({where: {roleId: roleId,
-              principalType: principalType, principalId: principalId}},
-            function(err, result) {
-              debug('Role mapping found: %j', result);
-              done(!err && result); // The only arg is the result
-            });
-        } else {
-          process.nextTick(function() {
-            done(false);
-          });
-        }
-      }, function(inRole) {
-        debug('isInRole() returns: %j', inRole);
-        if (callback) callback(null, inRole);
-      });
-    });
-
-  };
-
-  /**
-   * List roles for a given principal.
-   * @param {Object} context The security context.
-   *
-   * @callback {Function} callback Callback function.
-   * @param {Error} err Error object.
-   * @param {String[]} roles An array of role IDs
-   */
-  Role.getRoles = function(context, callback) {
-    if (!(context instanceof AccessContext)) {
-      context = new AccessContext(context);
-    }
-    var roles = [];
-    this.resolveRelatedModels();
-
-    var addRole = function(role) {
-      if (role && roles.indexOf(role) === -1) {
-        roles.push(role);
-      }
-    };
-
-    var self = this;
-    // Check against the smart roles
-    var inRoleTasks = [];
-    Object.keys(Role.resolvers).forEach(function(role) {
-      inRoleTasks.push(function(done) {
-        self.isInRole(role, context, function(err, inRole) {
-          if (debug.enabled) {
-            debug('In role %j: %j', role, inRole);
-          }
-          if (!err && inRole) {
-            addRole(role);
-            done();
-          } else {
-            done(err, null);
-          }
-        });
-      });
-    });
-
-    var roleMappingModel = this.roleMappingModel;
-    context.principals.forEach(function(p) {
-      // Check against the role mappings
-      var principalType = p.type || undefined;
-      var principalId = p.id == null ? undefined : p.id;
-
-      if (typeof principalId !== 'string' && principalId != null) {
-        principalId = principalId.toString();
-      }
-
-      // Add the role itself
-      if (principalType === RoleMapping.ROLE && principalId) {
-        addRole(principalId);
-      }
-
-      if (principalType && principalId) {
-        // Please find() treat undefined matches all values
-        inRoleTasks.push(function(done) {
-          roleMappingModel.find({where: {principalType: principalType,
-            principalId: principalId}}, function(err, mappings) {
-            debug('Role mappings found: %s %j', err, mappings);
-            if (err) {
-              if (done) done(err);
-              return;
-            }
-            mappings.forEach(function(m) {
-              addRole(m.roleId);
-            });
-            if (done) done();
-          });
-        });
-      }
-    });
-
-    async.parallel(inRoleTasks, function(err, results) {
-      debug('getRoles() returns: %j %j', err, roles);
-      if (callback) callback(err, roles);
-    });
-  };
-};
-
-}).call(this,require('_process'))
-},{"../../lib/access-context":573,"../../lib/loopback":581,"_process":279,"assert":22,"async":409,"debug":417}],568:[function(require,module,exports){
-arguments[4][229][0].apply(exports,arguments)
-},{"dup":229}],569:[function(require,module,exports){
-arguments[4][230][0].apply(exports,arguments)
-},{"../../lib/loopback":581,"assert":22,"dup":230}],570:[function(require,module,exports){
-arguments[4][231][0].apply(exports,arguments)
-},{"dup":231}],571:[function(require,module,exports){
-(function (__dirname){
-/*!
- * Module Dependencies.
- */
-
-var loopback = require('../../lib/loopback');
-var utils = require('../../lib/utils');
-var path = require('path');
-var SALT_WORK_FACTOR = 10;
+},{"./signature":629,"assert-plus":632,"buffer":58,"stream":349,"tweetnacl":668,"util":396}],617:[function(require,module,exports){
+arguments[4][333][0].apply(exports,arguments)
+},{"assert-plus":632,"dup":333,"util":396}],618:[function(require,module,exports){
+arguments[4][334][0].apply(exports,arguments)
+},{"./algs":614,"./errors":617,"./key":627,"./utils":631,"assert-plus":632,"buffer":58,"crypto":72,"dup":334}],619:[function(require,module,exports){
+arguments[4][335][0].apply(exports,arguments)
+},{"../key":627,"../private-key":628,"../utils":631,"./pem":620,"./rfc4253":623,"./ssh":625,"assert-plus":632,"buffer":58,"dup":335}],620:[function(require,module,exports){
+arguments[4][336][0].apply(exports,arguments)
+},{"../algs":614,"../key":627,"../private-key":628,"../utils":631,"./pkcs1":621,"./pkcs8":622,"./rfc4253":623,"./ssh-private":624,"asn1":409,"assert-plus":632,"buffer":58,"dup":336}],621:[function(require,module,exports){
+arguments[4][337][0].apply(exports,arguments)
+},{"../algs":614,"../key":627,"../private-key":628,"../utils":631,"./pem":620,"./pkcs8":622,"asn1":409,"assert-plus":632,"buffer":58,"dup":337}],622:[function(require,module,exports){
+arguments[4][338][0].apply(exports,arguments)
+},{"../algs":614,"../key":627,"../private-key":628,"../utils":631,"./pem":620,"asn1":409,"assert-plus":632,"buffer":58,"dup":338}],623:[function(require,module,exports){
+arguments[4][339][0].apply(exports,arguments)
+},{"../algs":614,"../key":627,"../private-key":628,"../ssh-buffer":630,"../utils":631,"assert-plus":632,"buffer":58,"dup":339}],624:[function(require,module,exports){
+arguments[4][340][0].apply(exports,arguments)
+},{"../algs":614,"../key":627,"../private-key":628,"../ssh-buffer":630,"../utils":631,"./pem":620,"./rfc4253":623,"asn1":409,"assert-plus":632,"buffer":58,"crypto":72,"dup":340}],625:[function(require,module,exports){
+arguments[4][341][0].apply(exports,arguments)
+},{"../key":627,"../private-key":628,"../utils":631,"./rfc4253":623,"./ssh-private":624,"assert-plus":632,"buffer":58,"dup":341}],626:[function(require,module,exports){
+arguments[4][342][0].apply(exports,arguments)
+},{"./errors":617,"./fingerprint":618,"./key":627,"./private-key":628,"./signature":629,"dup":342}],627:[function(require,module,exports){
+(function (Buffer){
+// Copyright 2015 Joyent, Inc.
+
+module.exports = Key;
+
+var assert = require('assert-plus');
+var algs = require('./algs');
 var crypto = require('crypto');
+var Fingerprint = require('./fingerprint');
+var Signature = require('./signature');
+var DiffieHellman = require('./dhe');
+var errs = require('./errors');
+var utils = require('./utils');
+var PrivateKey = require('./private-key');
+var edCompat;
 
-var bcrypt;
 try {
-  // Try the native module first
-  bcrypt = require('bcrypt');
-  // Browserify returns an empty object
-  if (bcrypt && typeof bcrypt.compare !== 'function') {
-    bcrypt = require('bcryptjs');
-  }
-} catch (err) {
-  // Fall back to pure JS impl
-  bcrypt = require('bcryptjs');
+	edCompat = require('./ed-compat');
+} catch (e) {
+	/* Just continue through, and bail out if we try to use it. */
 }
 
-var DEFAULT_TTL = 1209600; // 2 weeks in seconds
-var DEFAULT_RESET_PW_TTL = 15 * 60; // 15 mins in seconds
-var DEFAULT_MAX_TTL = 31556926; // 1 year in seconds
-var assert = require('assert');
-
-var debug = require('debug')('loopback:user');
-
-/**
- * Built-in User model.
- * Extends LoopBack [PersistedModel](#persistedmodel-new-persistedmodel).
- *
- * Default `User` ACLs.
- *
- * - DENY EVERYONE `*`
- * - ALLOW EVERYONE `create`
- * - ALLOW OWNER `deleteById`
- * - ALLOW EVERYONE `login`
- * - ALLOW EVERYONE `logout`
- * - ALLOW OWNER `findById`
- * - ALLOW OWNER `updateAttributes`
- *
- * @property {String} username Must be unique.
- * @property {String} password Hidden from remote clients.
- * @property {String} email Must be valid email.
- * @property {Boolean} emailVerified Set when a user's email has been verified via `confirm()`.
- * @property {String} verificationToken Set when `verify()` is called.
- * @property {String} realm The namespace the user belongs to. See [Partitioning users with realms](https://docs.strongloop.com/display/public/LB/Partitioning+users+with+realms) for details.
- * @property {Date} created The property is not used by LoopBack, you are free to use it for your own purposes.
- * @property {Date} lastUpdated The property is not used by LoopBack, you are free to use it for your own purposes.
- * @property {String} status The property is not used by LoopBack, you are free to use it for your own purposes.
- * @property {Object} settings Extends the `Model.settings` object.
- * @property {Boolean} settings.emailVerificationRequired Require the email verification
- * process before allowing a login.
- * @property {Number} settings.ttl Default time to live (in seconds) for the `AccessToken` created by `User.login() / user.createAccessToken()`.
- * Default is `1209600` (2 weeks)
- * @property {Number} settings.maxTTL The max value a user can request a token to be alive / valid for.
- * Default is `31556926` (1 year)
- * @property {Boolean} settings.realmRequired Require a realm when logging in a user.
- * @property {String} settings.realmDelimiter When set a realm is required.
- * @property {Number} settings.resetPasswordTokenTTL Time to live for password reset `AccessToken`. Default is `900` (15 minutes).
- * @property {Number} settings.saltWorkFactor The `bcrypt` salt work factor. Default is `10`.
- * @property {Boolean} settings.caseSensitiveEmail Enable case sensitive email.
- *
- * @class User
- * @inherits {PersistedModel}
- */
-
-module.exports = function(User) {
-
-  /**
-   * Create access token for the logged in user. This method can be overridden to
-   * customize how access tokens are generated
-   *
-   * @param {Number} ttl The requested ttl
-   * @param {Object} [options] The options for access token, such as scope, appId
-   * @callback {Function} cb The callback function
-   * @param {String|Error} err The error string or object
-   * @param {AccessToken} token The generated access token object
-   */
-  User.prototype.createAccessToken = function(ttl, options, cb) {
-    if (cb === undefined && typeof options === 'function') {
-      // createAccessToken(ttl, cb)
-      cb = options;
-      options = undefined;
-    }
-
-    cb = cb || utils.createPromiseCallback();
-
-    if (typeof ttl === 'object' && !options) {
-      // createAccessToken(options, cb)
-      options = ttl;
-      ttl = options.ttl;
-    }
-    options = options || {};
-    var userModel = this.constructor;
-    ttl = Math.min(ttl || userModel.settings.ttl, userModel.settings.maxTTL);
-    this.accessTokens.create({
-      ttl: ttl
-    }, cb);
-    return cb.promise;
-  };
-
-  function splitPrincipal(name, realmDelimiter) {
-    var parts = [null, name];
-    if (!realmDelimiter) {
-      return parts;
-    }
-    var index = name.indexOf(realmDelimiter);
-    if (index !== -1) {
-      parts[0] = name.substring(0, index);
-      parts[1] = name.substring(index + realmDelimiter.length);
-    }
-    return parts;
-  }
-
-  /**
-   * Normalize the credentials
-   * @param {Object} credentials The credential object
-   * @param {Boolean} realmRequired
-   * @param {String} realmDelimiter The realm delimiter, if not set, no realm is needed
-   * @returns {Object} The normalized credential object
-   */
-  User.normalizeCredentials = function(credentials, realmRequired, realmDelimiter) {
-    var query = {};
-    credentials = credentials || {};
-    if (!realmRequired) {
-      if (credentials.email) {
-        query.email = credentials.email;
-      } else if (credentials.username) {
-        query.username = credentials.username;
-      }
-    } else {
-      if (credentials.realm) {
-        query.realm = credentials.realm;
-      }
-      var parts;
-      if (credentials.email) {
-        parts = splitPrincipal(credentials.email, realmDelimiter);
-        query.email = parts[1];
-        if (parts[0]) {
-          query.realm = parts[0];
-        }
-      } else if (credentials.username) {
-        parts = splitPrincipal(credentials.username, realmDelimiter);
-        query.username = parts[1];
-        if (parts[0]) {
-          query.realm = parts[0];
-        }
-      }
-    }
-    return query;
-  };
-
-  /**
-   * Login a user by with the given `credentials`.
-   *
-   * ```js
-   *    User.login({username: 'foo', password: 'bar'}, function (err, token) {
-  *      console.log(token.id);
-  *    });
-   * ```
-   *
-   * @param {Object} credentials username/password or email/password
-   * @param {String[]|String} [include] Optionally set it to "user" to include
-   * the user info
-   * @callback {Function} callback Callback function
-   * @param {Error} err Error object
-   * @param {AccessToken} token Access token if login is successful
-   */
-
-  User.login = function(credentials, include, fn) {
-    var self = this;
-    if (typeof include === 'function') {
-      fn = include;
-      include = undefined;
-    }
-
-    fn = fn || utils.createPromiseCallback();
-
-    include = (include || '');
-    if (Array.isArray(include)) {
-      include = include.map(function(val) {
-        return val.toLowerCase();
-      });
-    } else {
-      include = include.toLowerCase();
-    }
-
-    var realmDelimiter;
-    // Check if realm is required
-    var realmRequired = !!(self.settings.realmRequired ||
-      self.settings.realmDelimiter);
-    if (realmRequired) {
-      realmDelimiter = self.settings.realmDelimiter;
-    }
-    var query = self.normalizeCredentials(credentials, realmRequired,
-      realmDelimiter);
-
-    if (realmRequired && !query.realm) {
-      var err1 = new Error('realm is required');
-      err1.statusCode = 400;
-      err1.code = 'REALM_REQUIRED';
-      fn(err1);
-      return fn.promise;
-    }
-    if (!query.email && !query.username) {
-      var err2 = new Error('username or email is required');
-      err2.statusCode = 400;
-      err2.code = 'USERNAME_EMAIL_REQUIRED';
-      fn(err2);
-      return fn.promise;
-    }
-
-    self.findOne({where: query}, function(err, user) {
-      var defaultError = new Error('login failed');
-      defaultError.statusCode = 401;
-      defaultError.code = 'LOGIN_FAILED';
-
-      function tokenHandler(err, token) {
-        if (err) return fn(err);
-        if (Array.isArray(include) ? include.indexOf('user') !== -1 : include === 'user') {
-          // NOTE(bajtos) We can't set token.user here:
-          //  1. token.user already exists, it's a function injected by
-          //     "AccessToken belongsTo User" relation
-          //  2. ModelBaseClass.toJSON() ignores own properties, thus
-          //     the value won't be included in the HTTP response
-          // See also loopback#161 and loopback#162
-          token.__data.user = user;
-        }
-        fn(err, token);
-      }
-
-      if (err) {
-        debug('An error is reported from User.findOne: %j', err);
-        fn(defaultError);
-      } else if (user) {
-        user.hasPassword(credentials.password, function(err, isMatch) {
-          if (err) {
-            debug('An error is reported from User.hasPassword: %j', err);
-            fn(defaultError);
-          } else if (isMatch) {
-            if (self.settings.emailVerificationRequired && !user.emailVerified) {
-              // Fail to log in if email verification is not done yet
-              debug('User email has not been verified');
-              err = new Error('login failed as the email has not been verified');
-              err.statusCode = 401;
-              err.code = 'LOGIN_FAILED_EMAIL_NOT_VERIFIED';
-              fn(err);
-            } else {
-              if (user.createAccessToken.length === 2) {
-                user.createAccessToken(credentials.ttl, tokenHandler);
-              } else {
-                user.createAccessToken(credentials.ttl, credentials, tokenHandler);
-              }
-            }
-          } else {
-            debug('The password is invalid for user %s', query.email || query.username);
-            fn(defaultError);
-          }
-        });
-      } else {
-        debug('No matching record is found for user %s', query.email || query.username);
-        fn(defaultError);
-      }
-    });
-    return fn.promise;
-  };
-
-  /**
-   * Logout a user with the given accessToken id.
-   *
-   * ```js
-   *    User.logout('asd0a9f8dsj9s0s3223mk', function (err) {
-  *      console.log(err || 'Logged out');
-  *    });
-   * ```
-   *
-   * @param {String} accessTokenID
-   * @callback {Function} callback
-   * @param {Error} err
-   */
-
-  User.logout = function(tokenId, fn) {
-    fn = fn || utils.createPromiseCallback();
-    this.relations.accessTokens.modelTo.findById(tokenId, function(err, accessToken) {
-      if (err) {
-        fn(err);
-      } else if (accessToken) {
-        accessToken.destroy(fn);
-      } else {
-        fn(new Error('could not find accessToken'));
-      }
-    });
-    return fn.promise;
-  };
-
-  /**
-   * Compare the given `password` with the users hashed password.
-   *
-   * @param {String} password The plain text password
-   * @returns {Boolean}
-   */
-
-  User.prototype.hasPassword = function(plain, fn) {
-    fn = fn || utils.createPromiseCallback();
-    if (this.password && plain) {
-      bcrypt.compare(plain, this.password, function(err, isMatch) {
-        if (err) return fn(err);
-        fn(null, isMatch);
-      });
-    } else {
-      fn(null, false);
-    }
-    return fn.promise;
-  };
-
-  /**
-   * Verify a user's identity by sending them a confirmation email.
-   *
-   * ```js
-   *    var options = {
-   *      type: 'email',
-   *      to: user.email,
-   *      template: 'verify.ejs',
-   *      redirect: '/',
-   *      tokenGenerator: function (user, cb) { cb("random-token"); }
-   *    };
-   *
-   *    user.verify(options, next);
-   * ```
-   *
-   * @options {Object} options
-   * @property {String} type Must be 'email'.
-   * @property {String} to Email address to which verification email is sent.
-   * @property {String} from Sender email addresss, for example
-   *   `'noreply@myapp.com'`.
-   * @property {String} subject Subject line text.
-   * @property {String} text Text of email.
-   * @property {String} template Name of template that displays verification
-   *  page, for example, `'verify.ejs'.
-   * @property {String} redirect Page to which user will be redirected after
-   *  they verify their email, for example `'/'` for root URI.
-   * @property {Function} generateVerificationToken A function to be used to
-   *  generate the verification token. It must accept the user object and a
-   *  callback function. This function should NOT add the token to the user
-   *  object, instead simply execute the callback with the token! User saving
-   *  and email sending will be handled in the `verify()` method.
-   */
-
-  User.prototype.verify = function(options, fn) {
-    fn = fn || utils.createPromiseCallback();
-
-    var user = this;
-    var userModel = this.constructor;
-    var registry = userModel.registry;
-    assert(typeof options === 'object', 'options required when calling user.verify()');
-    assert(options.type, 'You must supply a verification type (options.type)');
-    assert(options.type === 'email', 'Unsupported verification type');
-    assert(options.to || this.email, 'Must include options.to when calling user.verify() or the user must have an email property');
-    assert(options.from, 'Must include options.from when calling user.verify()');
-
-    options.redirect = options.redirect || '/';
-    options.template = path.resolve(options.template || path.join(__dirname, '..', '..', 'templates', 'verify.ejs'));
-    options.user = this;
-    options.protocol = options.protocol || 'http';
-
-    var app = userModel.app;
-    options.host = options.host || (app && app.get('host')) || 'localhost';
-    options.port = options.port || (app && app.get('port')) || 3000;
-    options.restApiRoot = options.restApiRoot || (app && app.get('restApiRoot')) || '/api';
-
-    var displayPort = (
-      (options.protocol === 'http' && options.port == '80') ||
-      (options.protocol === 'https' && options.port == '443')
-    ) ? '' : ':' + options.port;
-
-    options.verifyHref = options.verifyHref ||
-      options.protocol +
-      '://' +
-      options.host +
-      displayPort +
-      options.restApiRoot +
-      userModel.http.path +
-      userModel.sharedClass.find('confirm', true).http.path +
-      '?uid=' +
-      options.user.id +
-      '&redirect=' +
-      options.redirect;
-
-    // Email model
-    var Email = options.mailer || this.constructor.email || registry.getModelByType(loopback.Email);
-
-    // Set a default token generation function if one is not provided
-    var tokenGenerator = options.generateVerificationToken || User.generateVerificationToken;
-
-    tokenGenerator(user, function(err, token) {
-      if (err) { return fn(err); }
-
-      user.verificationToken = token;
-      user.save(function(err) {
-        if (err) {
-          fn(err);
-        } else {
-          sendEmail(user);
-        }
-      });
-    });
-
-    // TODO - support more verification types
-    function sendEmail(user) {
-      options.verifyHref += '&token=' + user.verificationToken;
-
-      options.text = options.text || 'Please verify your email by opening this link in a web browser:\n\t{href}';
-
-      options.text = options.text.replace('{href}', options.verifyHref);
-
-      options.to = options.to || user.email;
-
-      options.subject = options.subject || 'Thanks for Registering';
-
-      options.headers = options.headers || {};
-
-      var template = loopback.template(options.template);
-      options.html = template(options);
-
-      Email.send(options, function(err, email) {
-        if (err) {
-          fn(err);
-        } else {
-          fn(null, {email: email, token: user.verificationToken, uid: user.id});
-        }
-      });
-    }
-    return fn.promise;
-  };
-
-  /**
-   * A default verification token generator which accepts the user the token is
-   * being generated for and a callback function to indicate completion.
-   * This one uses the crypto library and 64 random bytes (converted to hex)
-   * for the token. When used in combination with the user.verify() method this
-   * function will be called with the `user` object as it's context (`this`).
-   *
-   * @param {object} user The User this token is being generated for.
-   * @param {Function} cb The generator must pass back the new token with this function call
-   */
-  User.generateVerificationToken = function(user, cb) {
-    crypto.randomBytes(64, function(err, buf) {
-      cb(err, buf && buf.toString('hex'));
-    });
-  };
-
-  /**
-   * Confirm the user's identity.
-   *
-   * @param {Any} userId
-   * @param {String} token The validation token
-   * @param {String} redirect URL to redirect the user to once confirmed
-   * @callback {Function} callback
-   * @param {Error} err
-   */
-  User.confirm = function(uid, token, redirect, fn) {
-    fn = fn || utils.createPromiseCallback();
-    this.findById(uid, function(err, user) {
-      if (err) {
-        fn(err);
-      } else {
-        if (user && user.verificationToken === token) {
-          user.verificationToken = undefined;
-          user.emailVerified = true;
-          user.save(function(err) {
-            if (err) {
-              fn(err);
-            } else {
-              fn();
-            }
-          });
-        } else {
-          if (user) {
-            err = new Error('Invalid token: ' + token);
-            err.statusCode = 400;
-            err.code = 'INVALID_TOKEN';
-          } else {
-            err = new Error('User not found: ' + uid);
-            err.statusCode = 404;
-            err.code = 'USER_NOT_FOUND';
-          }
-          fn(err);
-        }
-      }
-    });
-    return fn.promise;
-  };
-
-  /**
-   * Create a short lived acess token for temporary login. Allows users
-   * to change passwords if forgotten.
-   *
-   * @options {Object} options
-   * @prop {String} email The user's email address
-   * @callback {Function} callback
-   * @param {Error} err
-   */
-
-  User.resetPassword = function(options, cb) {
-    cb = cb || utils.createPromiseCallback();
-    var UserModel = this;
-    var ttl = UserModel.settings.resetPasswordTokenTTL || DEFAULT_RESET_PW_TTL;
-
-    options = options || {};
-    if (typeof options.email !== 'string') {
-      var err = new Error('Email is required');
-      err.statusCode = 400;
-      err.code = 'EMAIL_REQUIRED';
-      cb(err);
-      return cb.promise;
-    }
-
-    UserModel.findOne({ where: {email: options.email} }, function(err, user) {
-      if (err) {
-        return cb(err);
-      }
-      if (!user) {
-        err = new Error('Email not found');
-        err.statusCode = 404;
-        err.code = 'EMAIL_NOT_FOUND';
-        return cb(err);
-      }
-      // create a short lived access token for temp login to change password
-      // TODO(ritch) - eventually this should only allow password change
-      user.accessTokens.create({ttl: ttl}, function(err, accessToken) {
-        if (err) {
-          return cb(err);
-        }
-        cb();
-        UserModel.emit('resetPasswordRequest', {
-          email: options.email,
-          accessToken: accessToken,
-          user: user
-        });
-      });
-    });
-
-    return cb.promise;
-  };
-
-  /*!
-   * Hash the plain password
-   */
-  User.hashPassword = function(plain) {
-    this.validatePassword(plain);
-    var salt = bcrypt.genSaltSync(this.settings.saltWorkFactor || SALT_WORK_FACTOR);
-    return bcrypt.hashSync(plain, salt);
-  };
-
-  User.validatePassword = function(plain) {
-    if (typeof plain === 'string' && plain) {
-      return true;
-    }
-    var err =  new Error('Invalid password: ' + plain);
-    err.statusCode = 422;
-    throw err;
-  };
-
-  /*!
-   * Setup an extended user model.
-   */
-
-  User.setup = function() {
-    // We need to call the base class's setup method
-    User.base.setup.call(this);
-    var UserModel = this;
-
-    // max ttl
-    this.settings.maxTTL = this.settings.maxTTL || DEFAULT_MAX_TTL;
-    this.settings.ttl = this.settings.ttl || DEFAULT_TTL;
-
-    UserModel.setter.email = function(value) {
-      if (!UserModel.settings.caseSensitiveEmail) {
-        this.$email = value.toLowerCase();
-      } else {
-        this.$email = value;
-      }
-    };
-
-    UserModel.setter.password = function(plain) {
-      if (typeof plain !== 'string') {
-        return;
-      }
-      if (plain.indexOf('$2a$') === 0 && plain.length === 60) {
-        // The password is already hashed. It can be the case
-        // when the instance is loaded from DB
-        this.$password = plain;
-      } else {
-        this.$password = this.constructor.hashPassword(plain);
-      }
-    };
-
-    // Access token to normalize email credentials
-    UserModel.observe('access', function normalizeEmailCase(ctx, next) {
-      if (!ctx.Model.settings.caseSensitiveEmail && ctx.query.where && ctx.query.where.email) {
-        ctx.query.where.email = ctx.query.where.email.toLowerCase();
-      }
-      next();
-    });
-
-    // Make sure emailVerified is not set by creation
-    UserModel.beforeRemote('create', function(ctx, user, next) {
-      var body = ctx.req.body;
-      if (body && body.emailVerified) {
-        body.emailVerified = false;
-      }
-      next();
-    });
-
-    UserModel.remoteMethod(
-      'login',
-      {
-        description: 'Login a user with username/email and password.',
-        accepts: [
-          {arg: 'credentials', type: 'object', required: true, http: {source: 'body'}},
-          {arg: 'include', type: ['string'], http: {source: 'query' },
-            description: 'Related objects to include in the response. ' +
-            'See the description of return value for more details.'}
-        ],
-        returns: {
-          arg: 'accessToken', type: 'object', root: true,
-          description:
-            'The response body contains properties of the AccessToken created on login.\n' +
-            'Depending on the value of `include` parameter, the body may contain ' +
-            'additional properties:\n\n' +
-            '  - `user` - `{User}` - Data of the currently logged in user. (`include=user`)\n\n'
-        },
-        http: {verb: 'post'}
-      }
-    );
-
-    UserModel.remoteMethod(
-      'logout',
-      {
-        description: 'Logout a user with access token.',
-        accepts: [
-          {arg: 'access_token', type: 'string', required: true, http: function(ctx) {
-            var req = ctx && ctx.req;
-            var accessToken = req && req.accessToken;
-            var tokenID = accessToken && accessToken.id;
-
-            return tokenID;
-          }, description: 'Do not supply this argument, it is automatically extracted ' +
-            'from request headers.'
-          }
-        ],
-        http: {verb: 'all'}
-      }
-    );
-
-    UserModel.remoteMethod(
-      'confirm',
-      {
-        description: 'Confirm a user registration with email verification token.',
-        accepts: [
-          {arg: 'uid', type: 'string', required: true},
-          {arg: 'token', type: 'string', required: true},
-          {arg: 'redirect', type: 'string'}
-        ],
-        http: {verb: 'get', path: '/confirm'}
-      }
-    );
-
-    UserModel.remoteMethod(
-      'resetPassword',
-      {
-        description: 'Reset password for a user with email.',
-        accepts: [
-          {arg: 'options', type: 'object', required: true, http: {source: 'body'}}
-        ],
-        http: {verb: 'post', path: '/reset'}
-      }
-    );
-
-    UserModel.afterRemote('confirm', function(ctx, inst, next) {
-      if (ctx.args.redirect !== undefined) {
-        if (!ctx.res) {
-          return next(new Error('The transport does not support HTTP redirects.'));
-        }
-        ctx.res.location(ctx.args.redirect);
-        ctx.res.status(302);
-      }
-      next();
-    });
-
-    // default models
-    assert(loopback.Email, 'Email model must be defined before User model');
-    UserModel.email = loopback.Email;
-
-    assert(loopback.AccessToken, 'AccessToken model must be defined before User model');
-    UserModel.accessToken = loopback.AccessToken;
-
-    // email validation regex
-    var re = /^(([^<>()[\]\\.,;:\s@\"]+(\.[^<>()[\]\\.,;:\s@\"]+)*)|(\".+\"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
-
-    UserModel.validatesFormatOf('email', {with: re, message: 'Must provide a valid email'});
-
-    // FIXME: We need to add support for uniqueness of composite keys in juggler
-    if (!(UserModel.settings.realmRequired || UserModel.settings.realmDelimiter)) {
-      UserModel.validatesUniquenessOf('email', {message: 'Email already exists'});
-      UserModel.validatesUniquenessOf('username', {message: 'User already exists'});
-    }
-
-    return UserModel;
-  };
-
-  /*!
-   * Setup the base user.
-   */
-
-  User.setup();
-
-};
-
-}).call(this,"/..\\node_modules\\loopback\\common\\models")
-},{"../../lib/loopback":581,"../../lib/utils":586,"assert":22,"bcrypt":29,"bcryptjs":411,"crypto":72,"debug":417,"path":274}],572:[function(require,module,exports){
-arguments[4][232][0].apply(exports,arguments)
-},{"./lib/connectors/base-connector":577,"./lib/connectors/mail":578,"./lib/connectors/memory":579,"./lib/loopback":581,"dup":232,"loopback-connector-remote":511,"loopback-datasource-juggler":520,"loopback-datasource-juggler/lib/geo":525}],573:[function(require,module,exports){
-arguments[4][233][0].apply(exports,arguments)
-},{"./loopback":581,"assert":22,"debug":417,"dup":233}],574:[function(require,module,exports){
-(function (process,__dirname){
-/*!
- * Module dependencies.
- */
-
-var DataSource = require('loopback-datasource-juggler').DataSource;
-var Registry = require('./registry');
-var assert = require('assert');
-var fs = require('fs');
-var extend = require('util')._extend;
-var RemoteObjects = require('strong-remoting');
-var classify = require('underscore.string/classify');
-var camelize = require('underscore.string/camelize');
-var path = require('path');
-var util = require('util');
-
-/**
- * The `App` object represents a Loopback application.
- *
- * The App object extends [Express](http://expressjs.com/api.html#express) and
- * supports Express middleware. See
- * [Express documentation](http://expressjs.com/) for details.
- *
- * ```js
- * var loopback = require('loopback');
- * var app = loopback();
- *
- * app.get('/', function(req, res){
- *   res.send('hello world');
- * });
- *
- * app.listen(3000);
- * ```
- *
- * @class LoopBackApplication
- * @header var app = loopback()
- */
-function App() {
-  // this is a dummy placeholder for jsdox
+var InvalidAlgorithmError = errs.InvalidAlgorithmError;
+var KeyParseError = errs.KeyParseError;
+
+var formats = {};
+formats['auto'] = require('./formats/auto');
+formats['pem'] = require('./formats/pem');
+formats['pkcs1'] = require('./formats/pkcs1');
+formats['pkcs8'] = require('./formats/pkcs8');
+formats['rfc4253'] = require('./formats/rfc4253');
+formats['ssh'] = require('./formats/ssh');
+formats['ssh-private'] = require('./formats/ssh-private');
+formats['openssh'] = formats['ssh-private'];
+
+function Key(opts) {
+	assert.object(opts, 'options');
+	assert.arrayOfObject(opts.parts, 'options.parts');
+	assert.string(opts.type, 'options.type');
+	assert.optionalString(opts.comment, 'options.comment');
+
+	var algInfo = algs.info[opts.type];
+	if (typeof (algInfo) !== 'object')
+		throw (new InvalidAlgorithmError(opts.type));
+
+	var partLookup = {};
+	for (var i = 0; i < opts.parts.length; ++i) {
+		var part = opts.parts[i];
+		partLookup[part.name] = part;
+	}
+
+	this.type = opts.type;
+	this.parts = opts.parts;
+	this.part = partLookup;
+	this.comment = undefined;
+	this.source = opts.source;
+
+	/* for speeding up hashing/fingerprint operations */
+	this._rfc4253Cache = opts._rfc4253Cache;
+	this._hashCache = {};
+
+	var sz;
+	this.curve = undefined;
+	if (this.type === 'ecdsa') {
+		var curve = this.part.curve.data.toString();
+		this.curve = curve;
+		sz = algs.curves[curve].size;
+	} else if (this.type === 'ed25519') {
+		sz = 256;
+		this.curve = 'curve25519';
+	} else {
+		var szPart = this.part[algInfo.sizePart];
+		sz = szPart.data.length;
+		sz = sz * 8 - utils.countZeros(szPart.data);
+	}
+	this.size = sz;
 }
 
-/*!
- * Export the app prototype.
- */
+Key.formats = formats;
 
-var app = module.exports = {};
+Key.prototype.toBuffer = function (format) {
+	if (format === undefined)
+		format = 'ssh';
+	assert.string(format, 'format');
+	assert.object(formats[format], 'formats[format]');
 
-/**
- * Lazily load a set of [remote objects](http://apidocs.strongloop.com/strong-remoting/#remoteobjectsoptions).
- *
- * **NOTE:** Calling `app.remotes()` more than once returns only a single set of remote objects.
- * @returns {RemoteObjects}
- */
+	if (format === 'rfc4253') {
+		if (this._rfc4253Cache === undefined)
+			this._rfc4253Cache = formats['rfc4253'].write(this);
+		return (this._rfc4253Cache);
+	}
 
-app.remotes = function() {
-  if (this._remotes) {
-    return this._remotes;
-  } else {
-    var options = {};
-
-    if (this.get) {
-      options = this.get('remoting');
-    }
-
-    return (this._remotes = RemoteObjects.create(options));
-  }
+	return (formats[format].write(this));
 };
 
-/*!
- * Remove a route by reference.
- */
-
-app.disuse = function(route) {
-  if (this.stack) {
-    for (var i = 0; i < this.stack.length; i++) {
-      if (this.stack[i].route === route) {
-        this.stack.splice(i, 1);
-      }
-    }
-  }
+Key.prototype.toString = function (format) {
+	return (this.toBuffer(format).toString());
 };
 
-/**
- * Attach a model to the app. The `Model` will be available on the
- * `app.models` object.
- *
- * Example - Attach an existing model:
- ```js
- * var User = loopback.User;
- * app.model(User);
- *```
- * Example - Attach an existing model, alter some aspects of the model:
- * ```js
- * var User = loopback.User;
- * app.model(User, { dataSource: 'db' });
- *```
- *
- * @param {Object|String} Model The model to attach.
- * @options {Object} config The model's configuration.
- * @property {String|DataSource} dataSource The `DataSource` to which to attach the model.
- * @property {Boolean} [public] Whether the model should be exposed via REST API.
- * @property {Object} [relations] Relations to add/update.
- * @end
- * @returns {ModelConstructor} the model class
- */
+Key.prototype.hash = function (algo) {
+	assert.string(algo, 'algorithm');
+	algo = algo.toLowerCase();
+	if (algs.hashAlgs[algo] === undefined)
+		throw (new InvalidAlgorithmError(algo));
 
-app.model = function(Model, config) {
-  var isPublic = true;
-  var registry = this.registry;
+	if (this._hashCache[algo])
+		return (this._hashCache[algo]);
 
-  if (arguments.length > 1) {
-    config = config || {};
-    if (typeof Model === 'string') {
-      // create & attach the model - backwards compatibility
-
-      // create config for loopback.modelFromConfig
-      var modelConfig = extend({}, config);
-      modelConfig.options = extend({}, config.options);
-      modelConfig.name = Model;
-
-      // modeller does not understand `dataSource` option
-      delete modelConfig.dataSource;
-
-      Model = registry.createModel(modelConfig);
-
-      // delete config options already applied
-      ['relations', 'base', 'acls', 'hidden', 'methods'].forEach(function(prop) {
-        delete config[prop];
-        if (config.options) delete config.options[prop];
-      });
-      delete config.properties;
-    }
-
-    configureModel(Model, config, this);
-    isPublic = config.public !== false;
-  } else {
-    assert(Model.prototype instanceof Model.registry.getModel('Model'),
-      Model.modelName + ' must be a descendant of loopback.Model');
-  }
-
-  var modelName = Model.modelName;
-  this.models[modelName] =
-    this.models[classify(modelName)] =
-      this.models[camelize(modelName)] = Model;
-
-  this.models().push(Model);
-
-  if (isPublic && Model.sharedClass) {
-    this.remotes().addClass(Model.sharedClass);
-    if (Model.settings.trackChanges && Model.Change) {
-      this.remotes().addClass(Model.Change.sharedClass);
-    }
-    clearHandlerCache(this);
-    this.emit('modelRemoted', Model.sharedClass);
-  }
-
-  Model.shared = isPublic;
-  Model.app = this;
-  Model.emit('attached', this);
-  return Model;
+	var hash = crypto.createHash(algo).
+	    update(this.toBuffer('rfc4253')).digest();
+	/* Workaround for node 0.8 */
+	if (typeof (hash) === 'string')
+		hash = new Buffer(hash, 'binary');
+	this._hashCache[algo] = hash;
+	return (hash);
 };
 
-/**
- * Get the models exported by the app. Returns only models defined using `app.model()`
- *
- * There are two ways to access models:
- *
- * 1.  Call `app.models()` to get a list of all models.
- *
- * ```js
- * var models = app.models();
- *
- * models.forEach(function(Model) {
- *  console.log(Model.modelName); // color
- * });
- * ```
- *
- * 2. Use `app.model` to access a model by name.
- * `app.models` has properties for all defined models.
- *
- * The following example illustrates accessing the `Product` and `CustomerReceipt` models
- * using the `models` object.
- *
- * ```js
- * var loopback = require('loopback');
- *  var app = loopback();
- *  app.boot({
- *   dataSources: {
- *     db: {connector: 'memory'}
- *   }
- * });
- *
- * app.model('product', {dataSource: 'db'});
- * app.model('customer-receipt', {dataSource: 'db'});
- *
- * // available based on the given name
- * var Product = app.models.Product;
- *
- * // also available as camelCase
- * var product = app.models.product;
- *
- * // multi-word models are avaiable as pascal cased
- * var CustomerReceipt = app.models.CustomerReceipt;
- *
- * // also available as camelCase
- * var customerReceipt = app.models.customerReceipt;
- * ```
- *
- * @returns {Array} Array of model classes.
- */
-
-app.models = function() {
-  return this._models || (this._models = []);
+Key.prototype.fingerprint = function (algo) {
+	if (algo === undefined)
+		algo = 'sha256';
+	assert.string(algo, 'algorithm');
+	var opts = {
+		hash: this.hash(algo),
+		algorithm: algo
+	};
+	return (new Fingerprint(opts));
 };
 
-/**
- * Define a DataSource.
- *
- * @param {String} name The data source name
- * @param {Object} config The data source config
- */
-app.dataSource = function(name, config) {
-  var ds = dataSourcesFromConfig(name, config, this.connectors, this.registry);
-  this.dataSources[name] =
-  this.dataSources[classify(name)] =
-  this.dataSources[camelize(name)] = ds;
-  return ds;
+Key.prototype.defaultHashAlgorithm = function () {
+	var hashAlgo = 'sha1';
+	if (this.type === 'rsa')
+		hashAlgo = 'sha256';
+	if (this.type === 'dsa' && this.size > 1024)
+		hashAlgo = 'sha256';
+	if (this.type === 'ed25519')
+		hashAlgo = 'sha512';
+	if (this.type === 'ecdsa') {
+		if (this.size <= 256)
+			hashAlgo = 'sha256';
+		else if (this.size <= 384)
+			hashAlgo = 'sha384';
+		else
+			hashAlgo = 'sha512';
+	}
+	return (hashAlgo);
 };
 
-/**
- * Register a connector.
- *
- * When a new data-source is being added via `app.dataSource`, the connector
- * name is looked up in the registered connectors first.
- *
- * Connectors are required to be explicitly registered only for applications
- * using browserify, because browserify does not support dynamic require,
- * which is used by LoopBack to automatically load the connector module.
- *
- * @param {String} name Name of the connector, e.g. 'mysql'.
- * @param {Object} connector Connector object as returned
- *   by `require('loopback-connector-{name}')`.
- */
-app.connector = function(name, connector) {
-  this.connectors[name] =
-  this.connectors[classify(name)] =
-  this.connectors[camelize(name)] = connector;
+Key.prototype.createVerify = function (hashAlgo) {
+	if (hashAlgo === undefined)
+		hashAlgo = this.defaultHashAlgorithm();
+	assert.string(hashAlgo, 'hash algorithm');
+
+	/* ED25519 is not supported by OpenSSL, use a javascript impl. */
+	if (this.type === 'ed25519' && edCompat !== undefined)
+		return (new edCompat.Verifier(this, hashAlgo));
+	if (this.type === 'curve25519')
+		throw (new Error('Curve25519 keys are not suitable for ' +
+		    'signing or verification'));
+
+	var v, nm, err;
+	try {
+		nm = this.type.toUpperCase() + '-';
+		if (this.type === 'ecdsa')
+			nm = 'ecdsa-with-';
+		nm += hashAlgo.toUpperCase();
+		v = crypto.createVerify(nm);
+	} catch (e) {
+		err = e;
+	}
+	if (v === undefined || (err instanceof Error &&
+	    err.message.match(/Unknown message digest/))) {
+		nm = 'RSA-';
+		nm += hashAlgo.toUpperCase();
+		v = crypto.createVerify(nm);
+	}
+	assert.ok(v, 'failed to create verifier');
+	var oldVerify = v.verify.bind(v);
+	var key = this.toBuffer('pkcs8');
+	var self = this;
+	v.verify = function (signature, fmt) {
+		if (Signature.isSignature(signature, [2, 0])) {
+			if (signature.type !== self.type)
+				return (false);
+			if (signature.hashAlgorithm &&
+			    signature.hashAlgorithm !== hashAlgo)
+				return (false);
+			return (oldVerify(key, signature.toBuffer('asn1')));
+
+		} else if (typeof (signature) === 'string' ||
+		    Buffer.isBuffer(signature)) {
+			return (oldVerify(key, signature, fmt));
+
+		/*
+		 * Avoid doing this on valid arguments, walking the prototype
+		 * chain can be quite slow.
+		 */
+		} else if (Signature.isSignature(signature, [1, 0])) {
+			throw (new Error('signature was created by too old ' +
+			    'a version of sshpk and cannot be verified'));
+
+		} else {
+			throw (new TypeError('signature must be a string, ' +
+			    'Buffer, or Signature object'));
+		}
+	};
+	return (v);
 };
 
-/**
- * Get all remote objects.
- * @returns {Object} [Remote objects](http://apidocs.strongloop.com/strong-remoting/#remoteobjectsoptions).
- */
+Key.prototype.createDiffieHellman = function () {
+	if (this.type === 'rsa')
+		throw (new Error('RSA keys do not support Diffie-Hellman'));
 
-app.remoteObjects = function() {
-  var result = {};
+	return (new DiffieHellman(this));
+};
+Key.prototype.createDH = Key.prototype.createDiffieHellman;
 
-  this.remotes().classes().forEach(function(sharedClass) {
-    result[sharedClass.name] = sharedClass.ctor;
-  });
+Key.parse = function (data, format, name) {
+	if (typeof (data) !== 'string')
+		assert.buffer(data, 'data');
+	if (format === undefined)
+		format = 'auto';
+	assert.string(format, 'format');
+	if (name === undefined)
+		name = '(unnamed)';
 
-  return result;
+	assert.object(formats[format], 'formats[format]');
+
+	try {
+		var k = formats[format].read(data);
+		if (k instanceof PrivateKey)
+			k = k.toPublic();
+		if (!k.comment)
+			k.comment = name;
+		return (k);
+	} catch (e) {
+		throw (new KeyParseError(name, format, e));
+	}
 };
 
-/*!
- * Get a handler of the specified type from the handler cache.
- * @triggers `mounted` events on shared class constructors (models)
- */
-
-app.handler = function(type, options) {
-  var handlers = this._handlers || (this._handlers = {});
-  if (handlers[type]) {
-    return handlers[type];
-  }
-
-  var remotes = this.remotes();
-  var handler = this._handlers[type] = remotes.handler(type, options);
-
-  remotes.classes().forEach(function(sharedClass) {
-    sharedClass.ctor.emit('mounted', app, sharedClass, remotes);
-  });
-
-  return handler;
+Key.isKey = function (obj, ver) {
+	return (utils.isCompatible(obj, Key, ver));
 };
-
-/**
- * An object to store dataSource instances.
- */
-
-app.dataSources = app.datasources = {};
-
-/**
- * Enable app wide authentication.
- */
-
-app.enableAuth = function(options) {
-  var AUTH_MODELS = ['User', 'AccessToken', 'ACL', 'Role', 'RoleMapping'];
-
-  var remotes = this.remotes();
-  var app = this;
-
-  if (options && options.dataSource) {
-    var appModels = app.registry.modelBuilder.models;
-    AUTH_MODELS.forEach(function(m) {
-      var Model = app.registry.findModel(m);
-      if (!Model) {
-        throw new Error(
-          'Authentication requires model ' + m + ' to be defined.');
-      }
-
-      if (m.dataSource || m.app) return;
-
-      for (var name in appModels) {
-        var candidate = appModels[name];
-        var isSubclass = candidate.prototype instanceof Model;
-        var isAttached = !!candidate.dataSource || !!candidate.app;
-        if (isSubclass && isAttached) return;
-      }
-
-      app.model(Model, {
-        dataSource: options.dataSource,
-        public: m === 'User'
-      });
-    });
-  }
-
-  remotes.authorization = function(ctx, next) {
-    var method = ctx.method;
-    var req = ctx.req;
-    var Model = method.ctor;
-    var modelInstance = ctx.instance;
-
-    var modelId = modelInstance && modelInstance.id ||
-      // replacement for deprecated req.param()
-      (req.params && req.params.id !== undefined ? req.params.id :
-       req.body && req.body.id !== undefined ? req.body.id :
-       req.query && req.query.id !== undefined ? req.query.id :
-       undefined);
-
-    var modelName = Model.modelName;
-
-    var modelSettings = Model.settings || {};
-    var errStatusCode = modelSettings.aclErrorStatus || app.get('aclErrorStatus') || 401;
-    if (!req.accessToken) {
-      errStatusCode = 401;
-    }
-
-    if (Model.checkAccess) {
-      Model.checkAccess(
-        req.accessToken,
-        modelId,
-        method,
-        ctx,
-        function(err, allowed) {
-          if (err) {
-            console.log(err);
-            next(err);
-          } else if (allowed) {
-            next();
-          } else {
-
-            var messages = {
-              403: {
-                message: 'Access Denied',
-                code: 'ACCESS_DENIED'
-              },
-              404: {
-                message: ('could not find ' + modelName + ' with id ' + modelId),
-                code: 'MODEL_NOT_FOUND'
-              },
-              401: {
-                message: 'Authorization Required',
-                code: 'AUTHORIZATION_REQUIRED'
-              }
-            };
-
-            var e = new Error(messages[errStatusCode].message || messages[403].message);
-            e.statusCode = errStatusCode;
-            e.code = messages[errStatusCode].code || messages[403].code;
-            next(e);
-          }
-        }
-      );
-    } else {
-      next();
-    }
-  };
-
-  this.isAuthEnabled = true;
-};
-
-app.boot = function(options) {
-  throw new Error(
-    '`app.boot` was removed, use the new module loopback-boot instead');
-};
-
-function dataSourcesFromConfig(name, config, connectorRegistry, registry) {
-  var connectorPath;
-
-  assert(typeof config === 'object',
-    'cannont create data source without config object');
-
-  if (typeof config.connector === 'string') {
-    name = config.connector;
-    if (connectorRegistry[name]) {
-      config.connector = connectorRegistry[name];
-    } else {
-      connectorPath = path.join(__dirname, 'connectors', name + '.js');
-
-      if (fs.existsSync(connectorPath)) {
-        config.connector = require(connectorPath);
-      }
-    }
-  }
-
-  return registry.createDataSource(config);
-}
-
-function configureModel(ModelCtor, config, app) {
-  assert(ModelCtor.prototype instanceof ModelCtor.registry.getModel('Model'),
-    ModelCtor.modelName + ' must be a descendant of loopback.Model');
-
-  var dataSource = config.dataSource;
-
-  if (dataSource) {
-    if (typeof dataSource === 'string') {
-      dataSource = app.dataSources[dataSource];
-    }
-
-    assert(
-      dataSource instanceof DataSource,
-      ModelCtor.modelName + ' is referencing a dataSource that does not exist: "' +
-      config.dataSource + '"'
-    );
-  }
-
-  config = extend({}, config);
-  config.dataSource = dataSource;
-
-  setSharedMethodSharedProperties(ModelCtor, app, config);
-
-  app.registry.configureModel(ModelCtor, config);
-}
-
-function setSharedMethodSharedProperties(model, app, modelConfigs) {
-  var settings = {};
-
-  // apply config.json settings
-  var config = app.get('remoting');
-  var configHasSharedMethodsSettings = config &&
-      config.sharedMethods &&
-      typeof config.sharedMethods === 'object';
-  if (configHasSharedMethodsSettings)
-    util._extend(settings, config.sharedMethods);
-
-  // apply model-config.json settings
-  var modelConfig = modelConfigs.options;
-  var modelConfigHasSharedMethodsSettings = modelConfig &&
-      modelConfig.remoting &&
-      modelConfig.remoting.sharedMethods &&
-      typeof modelConfig.remoting.sharedMethods === 'object';
-  if (modelConfigHasSharedMethodsSettings)
-    util._extend(settings, modelConfig.remoting.sharedMethods);
-
-  // validate setting values
-  Object.keys(settings).forEach(function(setting) {
-    var settingValue = settings[setting];
-    var settingValueType = typeof settingValue;
-    if (settingValueType !== 'boolean')
-      throw new TypeError('Expected boolean, got ' + settingValueType);
-  });
-
-  // set sharedMethod.shared using the merged settings
-  var sharedMethods = model.sharedClass.methods({includeDisabled: true});
-  sharedMethods.forEach(function(sharedMethod) {
-    // use the specific setting if it exists
-    var hasSpecificSetting = settings.hasOwnProperty(sharedMethod.name);
-    if (hasSpecificSetting) {
-      sharedMethod.shared = settings[sharedMethod.name];
-    } else { // otherwise, use the default setting if it exists
-      var hasDefaultSetting = settings.hasOwnProperty('*');
-      if (hasDefaultSetting)
-        sharedMethod.shared = settings['*'];
-    }
-  });
-}
-
-function clearHandlerCache(app) {
-  app._handlers = undefined;
-}
-
-/**
- * Listen for connections and update the configured port.
- *
- * When there are no parameters or there is only one callback parameter,
- * the server will listen on `app.get('host')` and `app.get('port')`.
- *
- * For example, to listen on host/port configured in app config:
- * ```js
- * app.listen();
- * ```
- *
- * Otherwise all arguments are forwarded to `http.Server.listen`.
- *
- * For example, to listen on the specified port and all hosts, and ignore app config.
- * ```js
- * app.listen(80);
- * ```
- *
- * The function also installs a `listening` callback that calls
- * `app.set('port')` with the value returned by `server.address().port`.
- * This way the port param contains always the real port number, even when
- * listen was called with port number 0.
- *
- * @param {Function} [cb] If specified, the callback is added as a listener
- *   for the server's "listening" event.
- * @returns {http.Server} A node `http.Server` with this application configured
- *   as the request handler.
- */
-app.listen = function(cb) {
-  var self = this;
-
-  var server = require('http').createServer(this);
-
-  server.on('listening', function() {
-    self.set('port', this.address().port);
-
-    var listeningOnAll = false;
-    var host = self.get('host');
-    if (!host) {
-      listeningOnAll = true;
-      host = this.address().address;
-      self.set('host', host);
-    } else if (host === '0.0.0.0' || host === '::') {
-      listeningOnAll = true;
-    }
-
-    if (!self.get('url')) {
-      if (process.platform === 'win32' && listeningOnAll) {
-        // Windows browsers don't support `0.0.0.0` host in the URL
-        // We are replacing it with localhost to build a URL
-        // that can be copied and pasted into the browser.
-        host = 'localhost';
-      }
-      var url = 'http://' + host + ':' + self.get('port') + '/';
-      self.set('url', url);
-    }
-  });
-
-  var useAppConfig =
-    arguments.length === 0 ||
-      (arguments.length == 1 && typeof arguments[0] == 'function');
-
-  if (useAppConfig) {
-    server.listen(this.get('port'), this.get('host'), cb);
-  } else {
-    server.listen.apply(server, arguments);
-  }
-
-  return server;
-};
-
-}).call(this,require('_process'),"/..\\node_modules\\loopback\\lib")
-},{"./registry":584,"_process":279,"assert":22,"fs":56,"http":350,"loopback-datasource-juggler":520,"path":274,"strong-remoting":645,"underscore.string/camelize":671,"underscore.string/classify":673,"util":396}],575:[function(require,module,exports){
-arguments[4][235][0].apply(exports,arguments)
-},{"dup":235,"events":111,"util":396}],576:[function(require,module,exports){
-arguments[4][236][0].apply(exports,arguments)
-},{"../common/models/access-token.js":553,"../common/models/access-token.json":552,"../common/models/acl.js":555,"../common/models/acl.json":554,"../common/models/application.js":557,"../common/models/application.json":556,"../common/models/change.js":559,"../common/models/change.json":558,"../common/models/checkpoint.js":561,"../common/models/checkpoint.json":560,"../common/models/email.js":563,"../common/models/email.json":562,"../common/models/role-mapping.js":565,"../common/models/role-mapping.json":564,"../common/models/role.js":567,"../common/models/role.json":566,"../common/models/scope.js":569,"../common/models/scope.json":568,"../common/models/user.js":571,"../common/models/user.json":570,"dup":236}],577:[function(require,module,exports){
-arguments[4][237][0].apply(exports,arguments)
-},{"assert":22,"debug":417,"dup":237,"events":111,"util":396}],578:[function(require,module,exports){
-arguments[4][238][0].apply(exports,arguments)
-},{"../loopback":581,"_process":279,"assert":22,"debug":417,"dup":238,"nodemailer":29}],579:[function(require,module,exports){
-arguments[4][239][0].apply(exports,arguments)
-},{"./base-connector":577,"assert":22,"debug":417,"dup":239,"loopback-datasource-juggler/lib/connectors/memory":522,"util":396}],580:[function(require,module,exports){
-(function (__dirname){
-var path = require('path');
-
-var middlewares = exports;
-
-function safeRequire(m) {
-  try {
-    return require(m);
-  } catch (err) {
-    return undefined;
-  }
-}
-
-function createMiddlewareNotInstalled(memberName, moduleName) {
-  return function() {
-    var msg = 'The middleware loopback.' + memberName + ' is not installed.\n' +
-      'Run `npm install --save ' + moduleName + '` to fix the problem.';
-    throw new Error(msg);
-  };
-}
-
-var middlewareModules = {
-  'compress': 'compression',
-  'timeout': 'connect-timeout',
-  'cookieParser': 'cookie-parser',
-  'cookieSession': 'cookie-session',
-  'csrf': 'csurf',
-  'errorHandler': 'errorhandler',
-  'session': 'express-session',
-  'methodOverride': 'method-override',
-  'logger': 'morgan',
-  'responseTime': 'response-time',
-  'favicon': 'serve-favicon',
-  'directory': 'serve-index',
-  // 'static': 'serve-static',
-  'vhost': 'vhost'
-};
-
-middlewares.bodyParser = safeRequire('body-parser');
-middlewares.json = middlewares.bodyParser && middlewares.bodyParser.json;
-middlewares.urlencoded = middlewares.bodyParser && middlewares.bodyParser.urlencoded;
-
-for (var m in middlewareModules) {
-  var moduleName = middlewareModules[m];
-  middlewares[m] = safeRequire(moduleName) || createMiddlewareNotInstalled(m, moduleName);
-}
-
-// serve-favicon requires a path
-var favicon = middlewares.favicon;
-middlewares.favicon = function(icon, options) {
-  icon = icon || path.join(__dirname, '../favicon.ico');
-  return favicon(icon, options);
-};
-
-}).call(this,"/..\\node_modules\\loopback\\lib")
-},{"path":274}],581:[function(require,module,exports){
-(function (__dirname){
-/*!
- * Module dependencies.
- */
-
-var express = require('express');
-var loopbackExpress = require('./server-app');
-var proto = require('./application');
-var fs = require('fs');
-var ejs = require('ejs');
-var path = require('path');
-var merge = require('util')._extend;
-var assert = require('assert');
-var Registry = require('./registry');
-var juggler = require('loopback-datasource-juggler');
-
-/**
- * LoopBack core module. It provides static properties and
- * methods to create models and data sources. The module itself is a function
- * that creates loopback `app`. For example:
- *
- * ```js
- * var loopback = require('loopback');
- * var app = loopback();
- * ```
- *
- * @property {String} version Version of LoopBack framework.  Static read-only property.
- * @property {String} mime
- * @property {Boolean} isBrowser True if running in a browser environment; false otherwise.  Static read-only property.
- * @property {Boolean} isServer True if running in a server environment; false otherwise.  Static read-only property.
- * @property {Registry} registry The global `Registry` object.
- * @property {String} faviconFile Path to a default favicon shipped with LoopBack.
- * Use as follows: `app.use(require('serve-favicon')(loopback.faviconFile));`
- * @class loopback
- * @header loopback
- */
-
-var loopback = module.exports = createApplication;
-
-/*!
- * Framework version.
- */
-
-loopback.version = require('../package.json').version;
-
-/*!
- * Expose mime.
- */
-
-loopback.mime = express.mime;
-
-loopback.registry = new Registry();
-
-Object.defineProperties(loopback, {
-  Model: {
-    get: function() { return this.registry.getModel('Model'); }
-  },
-  PersistedModel: {
-    get: function() { return this.registry.getModel('PersistedModel'); }
-  },
-  defaultDataSources: {
-    get: function() { return this.registry.defaultDataSources; }
-  },
-  modelBuilder: {
-    get: function() { return this.registry.modelBuilder; }
-  }
-});
-
-/*!
- * Create an loopback application.
- *
- * @return {Function}
- * @api public
- */
-
-function createApplication(options) {
-  var app = loopbackExpress();
-
-  merge(app, proto);
-
-  app.loopback = loopback;
-
-  // Create a new instance of models registry per each app instance
-  app.models = function() {
-    return proto.models.apply(this, arguments);
-  };
-
-  // Create a new instance of datasources registry per each app instance
-  app.datasources = app.dataSources = {};
-
-  // Create a new instance of connector registry per each app instance
-  app.connectors = {};
-
-  // Register built-in connectors. It's important to keep this code
-  // hand-written, so that all require() calls are static
-  // and thus browserify can process them (include connectors in the bundle)
-  app.connector('memory', loopback.Memory);
-  app.connector('remote', loopback.Remote);
-
-  if (loopback.localRegistry || options && options.localRegistry === true) {
-    // setup the app registry
-    var registry = app.registry = new Registry();
-    if (options && options.loadBuiltinModels === true) {
-      require('./builtin-models')(registry);
-    }
-  } else {
-    app.registry = loopback.registry;
-  }
-
-  return app;
-}
-
-function mixin(source) {
-  for (var key in source) {
-    var desc = Object.getOwnPropertyDescriptor(source, key);
-
-    // Fix for legacy (pre-ES5) browsers like PhantomJS
-    if (!desc) continue;
-
-    Object.defineProperty(loopback, key, desc);
-  }
-}
-
-mixin(require('./runtime'));
-
-/*!
- * Expose static express methods like `express.errorHandler`.
- */
-
-mixin(express);
-
-/*!
- * Expose additional middleware like session as loopback.*
- * This will keep the loopback API compatible with express 3.x
- *
- * ***only in node***
- */
-
-if (loopback.isServer) {
-  var middlewares = require('./express-middleware');
-  mixin(middlewares);
-}
-
-/*!
- * Expose additional loopback middleware
- * for example `loopback.configure` etc.
- *
- * ***only in node***
- */
-
-if (loopback.isServer) {
-  fs
-    .readdirSync(path.join(__dirname, '..', 'server', 'middleware'))
-    .filter(function(file) {
-      return file.match(/\.js$/);
-    })
-    .forEach(function(m) {
-      loopback[m.replace(/\.js$/, '')] = require('../server/middleware/' + m);
-    });
-
-  loopback.urlNotFound = loopback['url-not-found'];
-  delete loopback['url-not-found'];
-
-  loopback.errorHandler = loopback['error-handler'];
-  delete loopback['error-handler'];
-}
 
 /*
- * Expose path to the default favicon file
- *
- * ***only in node***
+ * API versions for Key:
+ * [1,0] -- initial ver, may take Signature for createVerify or may not
+ * [1,1] -- added pkcs1, pkcs8 formats
+ * [1,2] -- added auto, ssh-private, openssh formats
+ * [1,3] -- added defaultHashAlgorithm
+ * [1,4] -- added ed support, createDH
+ * [1,5] -- first explicitly tagged version
  */
+Key.prototype._sshpkApiVersion = [1, 5];
 
-if (loopback.isServer) {
-  /*!
-   * Path to a default favicon shipped with LoopBack.
-   *
-   * **Example**
-   *
-   * ```js
-   * app.use(require('serve-favicon')(loopback.faviconFile));
-   * ```
-   */
-  loopback.faviconFile = path.resolve(__dirname, '../favicon.ico');
-}
-
-/**
- * Add a remote method to a model.
- * @param {Function} fn
- * @param {Object} options (optional)
- */
-
-loopback.remoteMethod = function(fn, options) {
-  fn.shared = true;
-  if (typeof options === 'object') {
-    Object.keys(options).forEach(function(key) {
-      fn[key] = options[key];
-    });
-  }
-  fn.http = fn.http || {verb: 'get'};
+Key._oldVersionDetect = function (obj) {
+	assert.func(obj.toBuffer);
+	assert.func(obj.fingerprint);
+	if (obj.createDH)
+		return ([1, 4]);
+	if (obj.defaultHashAlgorithm)
+		return ([1, 3]);
+	if (obj.formats['auto'])
+		return ([1, 2]);
+	if (obj.formats['pkcs1'])
+		return ([1, 1]);
+	return ([1, 0]);
 };
 
-/**
- * Create a template helper.
- *
- *     var render = loopback.template('foo.ejs');
- *     var html = render({foo: 'bar'});
- *
- * @param {String} path Path to the template file.
- * @returns {Function}
- */
-
-loopback.template = function(file) {
-  var templates = this._templates || (this._templates = {});
-  var str = templates[file] || (templates[file] = fs.readFileSync(file, 'utf8'));
-  return ejs.compile(str, {
-    filename: file
-  });
-};
-
-require('../server/current-context')(loopback);
-
-/**
- * Create a named vanilla JavaScript class constructor with an attached
- * set of properties and options.
- *
- * This function comes with two variants:
- *  * `loopback.createModel(name, properties, options)`
- *  * `loopback.createModel(config)`
- *
- * In the second variant, the parameters `name`, `properties` and `options`
- * are provided in the config object. Any additional config entries are
- * interpreted as `options`, i.e. the following two configs are identical:
- *
- * ```js
- * { name: 'Customer', base: 'User' }
- * { name: 'Customer', options: { base: 'User' } }
- * ```
- *
- * **Example**
- *
- * Create an `Author` model using the three-parameter variant:
- *
- * ```js
- * loopback.createModel(
- *   'Author',
- *   {
- *     firstName: 'string',
- *     lastName: 'string'
- *   },
- *   {
- *     relations: {
- *       books: {
- *         model: 'Book',
- *         type: 'hasAndBelongsToMany'
- *       }
- *     }
- *   }
- * );
- * ```
- *
- * Create the same model using a config object:
- *
- * ```js
- * loopback.createModel({
- *   name: 'Author',
- *   properties: {
- *     firstName: 'string',
- *     lastName: 'string'
- *   },
- *   relations: {
- *     books: {
- *       model: 'Book',
- *       type: 'hasAndBelongsToMany'
- *     }
- *   }
- * });
- * ```
- *
- * @param {String} name Unique name.
- * @param {Object} properties
- * @param {Object} options (optional)
- *
- * @header loopback.createModel
- */
-
-loopback.createModel = function(name, properties, options) {
-  return this.registry.createModel.apply(this.registry, arguments);
-};
-
-/**
- * Alter an existing Model class.
- * @param {Model} ModelCtor The model constructor to alter.
- * @options {Object} config Additional configuration to apply
- * @property {DataSource} dataSource Attach the model to a dataSource.
- * @property {Object} [relations] Model relations to add/update.
- *
- * @header loopback.configureModel(ModelCtor, config)
- */
-
-loopback.configureModel = function(ModelCtor, config) {
-  return this.registry.configureModel.apply(this.registry, arguments);
-};
-
-/**
- * Look up a model class by name from all models created by
- * `loopback.createModel()`
- * @param {String} modelName The model name
- * @returns {Model} The model class
- *
- * @header loopback.findModel(modelName)
- */
-loopback.findModel = function(modelName) {
-  return this.registry.findModel.apply(this.registry, arguments);
-};
-
-/**
- * Look up a model class by name from all models created by
- * `loopback.createModel()`. Throw an error when no such model exists.
- *
- * @param {String} modelName The model name
- * @returns {Model} The model class
- *
- * @header loopback.getModel(modelName)
- */
-loopback.getModel = function(modelName) {
-  return this.registry.getModel.apply(this.registry, arguments);
-};
-
-/**
- * Look up a model class by the base model class.
- * The method can be used by LoopBack
- * to find configured models in models.json over the base model.
- * @param {Model} modelType The base model class
- * @returns {Model} The subclass if found or the base class
- *
- * @header loopback.getModelByType(modelType)
- */
-loopback.getModelByType = function(modelType) {
-  return this.registry.getModelByType.apply(this.registry, arguments);
-};
-
-/**
- * Create a data source with passing the provided options to the connector.
- *
- * @param {String} name Optional name.
- * @options {Object} options Data Source options
- * @property {Object} connector LoopBack connector.
- * @property {*} [*] Other&nbsp;connector properties.
- *   See the relevant connector documentation.
- */
-
-loopback.createDataSource = function(name, options) {
-  return this.registry.createDataSource.apply(this.registry, arguments);
-};
-
-/**
- * Get an in-memory data source. Use one if it already exists.
- *
- * @param {String} [name] The name of the data source.
- * If not provided, the `'default'` is used.
- */
-
-loopback.memory = function(name) {
-  return this.registry.memory.apply(this.registry, arguments);
-};
-
-/**
- * Set the default `dataSource` for a given `type`.
- * @param {String} type The datasource type.
- * @param {Object|DataSource} dataSource The data source settings or instance
- * @returns {DataSource} The data source instance.
- *
- * @header loopback.setDefaultDataSourceForType(type, dataSource)
- */
-
-loopback.setDefaultDataSourceForType = function(type, dataSource) {
-  return this.registry.setDefaultDataSourceForType.apply(this.registry, arguments);
-};
-
-/**
- * Get the default `dataSource` for a given `type`.
- * @param {String} type The datasource type.
- * @returns {DataSource} The data source instance
- */
-
-loopback.getDefaultDataSourceForType = function(type) {
-  return this.registry.getDefaultDataSourceForType.apply(this.registry, arguments);
-};
-
-/**
- * Attach any model that does not have a dataSource to
- * the default dataSource for the type the Model requests
- */
-
-loopback.autoAttach = function() {
-  return this.registry.autoAttach.apply(this.registry, arguments);
-};
-
-loopback.autoAttachModel = function(ModelCtor) {
-  return this.registry.autoAttachModel.apply(this.registry, arguments);
-};
-
-// temporary alias to simplify migration of code based on <=2.0.0-beta3
-// TODO(bajtos) Remove this in v3.0
-Object.defineProperty(loopback, 'DataModel', {
-  get: function() {
-    return this.registry.DataModel;
-  }
-});
-
-/*!
- * Built in models / services
- */
-
-require('./builtin-models')(loopback);
-
-loopback.DataSource = juggler.DataSource;
-
-}).call(this,"/..\\node_modules\\loopback\\lib")
-},{"../package.json":587,"../server/current-context":551,"./application":574,"./builtin-models":576,"./express-middleware":580,"./registry":584,"./runtime":585,"./server-app":575,"assert":22,"ejs":424,"express":575,"fs":56,"loopback-datasource-juggler":520,"path":274,"util":396}],582:[function(require,module,exports){
-arguments[4][242][0].apply(exports,arguments)
-},{"assert":22,"dup":242,"loopback-datasource-juggler":520,"strong-remoting":645,"util":396}],583:[function(require,module,exports){
-arguments[4][243][0].apply(exports,arguments)
-},{"./runtime":585,"./utils":586,"_process":279,"assert":22,"async":409,"debug":417,"depd":521,"dup":243,"stream":349}],584:[function(require,module,exports){
-arguments[4][244][0].apply(exports,arguments)
-},{"./model":582,"./persisted-model":583,"assert":22,"debug":417,"dup":244,"loopback-datasource-juggler":520,"util":396}],585:[function(require,module,exports){
-arguments[4][245][0].apply(exports,arguments)
-},{"dup":245}],586:[function(require,module,exports){
-arguments[4][246][0].apply(exports,arguments)
-},{"dup":246}],587:[function(require,module,exports){
-module.exports={
-  "_args": [
-    [
-      "loopback@^2.22.0",
-      "C:\\Users\\wsteiner.LOGICX\\Documents\\ipp-project\\apps\\prototyping\\Prototypes\\loopback-full-stack-tenancy"
-    ]
-  ],
-  "_from": "loopback@>=2.22.0 <3.0.0",
-  "_id": "loopback@2.26.2",
-  "_inCache": true,
-  "_location": "/loopback",
-  "_nodeVersion": "4.2.3",
-  "_npmUser": {
-    "email": "mbajtoss@gmail.com",
-    "name": "bajtos"
-  },
-  "_npmVersion": "2.14.7",
-  "_phantomChildren": {},
-  "_requested": {
-    "name": "loopback",
-    "raw": "loopback@^2.22.0",
-    "rawSpec": "^2.22.0",
-    "scope": null,
-    "spec": ">=2.22.0 <3.0.0",
-    "type": "range"
-  },
-  "_requiredBy": [
-    "/"
-  ],
-  "_resolved": "http://logicxklubuild:4873/loopback/-/loopback-2.26.2.tgz",
-  "_shasum": "9fc08f55a0e8868050698d8891652cf38648cd66",
-  "_shrinkwrap": null,
-  "_spec": "loopback@^2.22.0",
-  "_where": "C:\\Users\\wsteiner.LOGICX\\Documents\\ipp-project\\apps\\prototyping\\Prototypes\\loopback-full-stack-tenancy",
-  "browser": {
-    "./lib/server-app.js": "./lib/browser-express.js",
-    "./server/current-context.js": "./browser/current-context.js",
-    "bcrypt": false,
-    "connect": false,
-    "depd": "loopback-datasource-juggler/lib/browser.depd.js",
-    "express": "./lib/browser-express.js",
-    "nodemailer": false,
-    "supertest": false
-  },
-  "bugs": {
-    "url": "https://github.com/strongloop/loopback/issues"
-  },
-  "dependencies": {
-    "async": "^0.9.0",
-    "bcryptjs": "^2.1.0",
-    "body-parser": "^1.12.0",
-    "canonical-json": "0.0.4",
-    "continuation-local-storage": "^3.1.3",
-    "cookie-parser": "^1.3.4",
-    "debug": "^2.1.2",
-    "depd": "^1.0.0",
-    "ejs": "^2.3.1",
-    "errorhandler": "^1.3.4",
-    "express": "^4.12.2",
-    "inflection": "^1.6.0",
-    "loopback-connector-remote": "^1.0.3",
-    "loopback-phase": "^1.2.0",
-    "nodemailer": "^1.3.1",
-    "nodemailer-stub-transport": "^0.1.5",
-    "serve-favicon": "^2.2.0",
-    "sl-blip": "http://blip.strongloop.com/loopback@2.26.2",
-    "stable": "^0.1.5",
-    "strong-remoting": "^2.21.0",
-    "uid2": "0.0.3",
-    "underscore.string": "^3.0.3"
-  },
-  "description": "LoopBack: Open Source Framework for Node.js",
-  "devDependencies": {
-    "bluebird": "^2.9.9",
-    "browserify": "^10.0.0",
-    "chai": "^2.1.1",
-    "es5-shim": "^4.1.0",
-    "grunt": "^0.4.5",
-    "grunt-browserify": "^3.5.0",
-    "grunt-cli": "^0.1.13",
-    "grunt-contrib-jshint": "^0.11.0",
-    "grunt-contrib-uglify": "^0.9.1",
-    "grunt-contrib-watch": "^0.6.1",
-    "grunt-jscs": "^1.5.0",
-    "grunt-karma": "^0.10.1",
-    "grunt-mocha-test": "^0.12.7",
-    "karma": "^0.12.31",
-    "karma-browserify": "^4.0.0",
-    "karma-chrome-launcher": "^0.1.7",
-    "karma-firefox-launcher": "^0.1.4",
-    "karma-html2js-preprocessor": "^0.1.0",
-    "karma-junit-reporter": "^0.2.2",
-    "karma-mocha": "^0.1.10",
-    "karma-phantomjs-launcher": "^0.1.4",
-    "karma-script-launcher": "^0.1.0",
-    "loopback-boot": "^2.7.0",
-    "loopback-datasource-juggler": "^2.19.1",
-    "loopback-testing": "~1.1.0",
-    "mocha": "^2.1.0",
-    "sinon": "^1.13.0",
-    "strong-task-emitter": "^0.0.6",
-    "supertest": "^0.15.0"
-  },
-  "directories": {},
-  "dist": {
-    "shasum": "9fc08f55a0e8868050698d8891652cf38648cd66",
-    "tarball": "http://logicxklubuild:4873/loopback/-/loopback-2.26.2.tgz"
-  },
-  "gitHead": "122c1186ba96c502f9e34f1a372feda0ce2048a2",
-  "homepage": "http://loopback.io",
-  "installable": true,
-  "keywords": [
-    "StrongLoop",
-    "api",
-    "auth",
-    "express",
-    "framework",
-    "koa",
-    "mBaaS",
-    "mobile",
-    "mongo",
-    "mongodb",
-    "mssql",
-    "mysql",
-    "nosql",
-    "oracle",
-    "postgres",
-    "postgresql",
-    "rest",
-    "restful",
-    "restify",
-    "security",
-    "soap",
-    "sqlserver",
-    "web"
-  ],
-  "license": "MIT",
-  "maintainers": [
-    {
-      "name": "rfeng",
-      "email": "enjoyjava@gmail.com"
-    },
-    {
-      "name": "ritch",
-      "email": "skawful@gmail.com"
-    },
-    {
-      "name": "strongloop",
-      "email": "callback@strongloop.com"
-    },
-    {
-      "name": "bajtos",
-      "email": "miro.bajtos@gmail.com"
-    },
-    {
-      "name": "altsang",
-      "email": "al@strongloop.com"
-    }
-  ],
-  "name": "loopback",
-  "optionalDependencies": {
-    "sl-blip": "http://blip.strongloop.com/loopback@2.26.2"
-  },
-  "peerDependencies": {
-    "loopback-datasource-juggler": "^2.19.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/strongloop/loopback.git"
-  },
-  "scripts": {
-    "test": "grunt mocha-and-karma"
-  },
-  "version": "2.26.2"
-}
-
-},{}],588:[function(require,module,exports){
-arguments[4][249][0].apply(exports,arguments)
-},{"dup":249}],589:[function(require,module,exports){
-arguments[4][250][0].apply(exports,arguments)
-},{"./db.json":588,"dup":250}],590:[function(require,module,exports){
-arguments[4][251][0].apply(exports,arguments)
-},{"dup":251,"mime-db":589,"path":274}],591:[function(require,module,exports){
-arguments[4][253][0].apply(exports,arguments)
-},{"dup":253}],592:[function(require,module,exports){
-arguments[4][254][0].apply(exports,arguments)
-},{"./inject":593,"dup":254,"stream-serializer":642}],593:[function(require,module,exports){
-arguments[4][255][0].apply(exports,arguments)
-},{"dup":255,"duplex":420,"through":659,"xtend":681}],594:[function(require,module,exports){
-arguments[4][256][0].apply(exports,arguments)
-},{"buffer":58,"crypto":72,"dup":256}],595:[function(require,module,exports){
-arguments[4][257][0].apply(exports,arguments)
-},{"crypto":72,"dup":257,"querystring":293}],596:[function(require,module,exports){
-arguments[4][258][0].apply(exports,arguments)
-},{"dup":258,"fs":56}],597:[function(require,module,exports){
-arguments[4][276][0].apply(exports,arguments)
-},{"dup":276,"pinkie":598}],598:[function(require,module,exports){
-arguments[4][277][0].apply(exports,arguments)
-},{"_process":279,"dup":277}],599:[function(require,module,exports){
-arguments[4][278][0].apply(exports,arguments)
-},{"_process":279,"dup":278}],600:[function(require,module,exports){
-arguments[4][211][0].apply(exports,arguments)
-},{"./parse":601,"./stringify":602,"dup":211}],601:[function(require,module,exports){
-arguments[4][288][0].apply(exports,arguments)
-},{"./utils":603,"dup":288}],602:[function(require,module,exports){
-arguments[4][289][0].apply(exports,arguments)
-},{"./utils":603,"dup":289}],603:[function(require,module,exports){
-arguments[4][290][0].apply(exports,arguments)
-},{"dup":290}],604:[function(require,module,exports){
-arguments[4][295][0].apply(exports,arguments)
-},{"./lib/_stream_duplex.js":605,"dup":295}],605:[function(require,module,exports){
-arguments[4][296][0].apply(exports,arguments)
-},{"./_stream_readable":606,"./_stream_writable":607,"core-util-is":416,"dup":296,"inherits":460,"process-nextick-args":599}],606:[function(require,module,exports){
-arguments[4][298][0].apply(exports,arguments)
-},{"./_stream_duplex":605,"_process":279,"buffer":58,"core-util-is":416,"dup":298,"events":111,"inherits":460,"isarray":466,"process-nextick-args":599,"string_decoder/":643,"util":29}],607:[function(require,module,exports){
-arguments[4][300][0].apply(exports,arguments)
-},{"./_stream_duplex":605,"buffer":58,"core-util-is":416,"dup":300,"events":111,"inherits":460,"process-nextick-args":599,"util-deprecate":679}],608:[function(require,module,exports){
-arguments[4][305][0].apply(exports,arguments)
-},{"./lib/cookies":610,"./lib/helpers":613,"./request":619,"dup":305,"extend":428}],609:[function(require,module,exports){
-arguments[4][306][0].apply(exports,arguments)
-},{"./helpers":613,"caseless":414,"dup":306,"node-uuid":594}],610:[function(require,module,exports){
-arguments[4][307][0].apply(exports,arguments)
-},{"dup":307,"tough-cookie":660}],611:[function(require,module,exports){
-arguments[4][308][0].apply(exports,arguments)
-},{"_process":279,"dup":308}],612:[function(require,module,exports){
-arguments[4][309][0].apply(exports,arguments)
-},{"dup":309,"fs":56,"har-validator":435,"querystring":293,"util":396}],613:[function(require,module,exports){
-arguments[4][310][0].apply(exports,arguments)
-},{"_process":279,"buffer":58,"crypto":72,"dup":310,"json-stringify-safe":476}],614:[function(require,module,exports){
-arguments[4][311][0].apply(exports,arguments)
-},{"buffer":58,"combined-stream":415,"dup":311,"isstream":467,"node-uuid":594}],615:[function(require,module,exports){
-arguments[4][312][0].apply(exports,arguments)
-},{"buffer":58,"caseless":414,"crypto":72,"dup":312,"node-uuid":594,"oauth-sign":595,"qs":600,"url":392}],616:[function(require,module,exports){
-arguments[4][313][0].apply(exports,arguments)
-},{"dup":313,"qs":600,"querystring":293}],617:[function(require,module,exports){
-arguments[4][314][0].apply(exports,arguments)
-},{"dup":314,"url":392}],618:[function(require,module,exports){
-arguments[4][315][0].apply(exports,arguments)
-},{"dup":315,"tunnel-agent":668,"url":392}],619:[function(require,module,exports){
-arguments[4][316][0].apply(exports,arguments)
-},{"./lib/auth":609,"./lib/cookies":610,"./lib/getProxyFromURI":611,"./lib/har":612,"./lib/helpers":613,"./lib/multipart":614,"./lib/oauth":615,"./lib/querystring":616,"./lib/redirect":617,"./lib/tunnel":618,"_process":279,"aws-sign2":410,"bl":412,"buffer":58,"caseless":414,"dup":316,"forever-agent":430,"form-data":431,"hawk":453,"http":350,"http-signature":454,"https":150,"is-typedarray":465,"mime-types":590,"stream":349,"stringstream":644,"url":392,"util":396,"zlib":55}],620:[function(require,module,exports){
-arguments[4][327][0].apply(exports,arguments)
-},{"./lib/sse":621,"dup":327}],621:[function(require,module,exports){
-arguments[4][328][0].apply(exports,arguments)
-},{"./sseclient":622,"dup":328,"events":111,"options":596,"querystring":293,"url":392,"util":396}],622:[function(require,module,exports){
-arguments[4][329][0].apply(exports,arguments)
-},{"dup":329,"events":111,"util":396}],623:[function(require,module,exports){
-arguments[4][330][0].apply(exports,arguments)
-},{"buffer":58,"dup":330}],624:[function(require,module,exports){
-arguments[4][331][0].apply(exports,arguments)
-},{"./algs":623,"./key":636,"./private-key":637,"./utils":640,"assert-plus":641,"buffer":58,"crypto":72,"dup":331,"ecc-jsbn":421,"ecc-jsbn/lib/ec":422,"jodid25519":468,"jsbn":474}],625:[function(require,module,exports){
-arguments[4][332][0].apply(exports,arguments)
-},{"./signature":638,"assert-plus":641,"buffer":58,"dup":332,"stream":349,"tweetnacl":669,"util":396}],626:[function(require,module,exports){
-arguments[4][333][0].apply(exports,arguments)
-},{"assert-plus":641,"dup":333,"util":396}],627:[function(require,module,exports){
-arguments[4][334][0].apply(exports,arguments)
-},{"./algs":623,"./errors":626,"./key":636,"./utils":640,"assert-plus":641,"buffer":58,"crypto":72,"dup":334}],628:[function(require,module,exports){
-arguments[4][335][0].apply(exports,arguments)
-},{"../key":636,"../private-key":637,"../utils":640,"./pem":629,"./rfc4253":632,"./ssh":634,"assert-plus":641,"buffer":58,"dup":335}],629:[function(require,module,exports){
-arguments[4][336][0].apply(exports,arguments)
-},{"../algs":623,"../key":636,"../private-key":637,"../utils":640,"./pkcs1":630,"./pkcs8":631,"./rfc4253":632,"./ssh-private":633,"asn1":407,"assert-plus":641,"buffer":58,"dup":336}],630:[function(require,module,exports){
-arguments[4][337][0].apply(exports,arguments)
-},{"../algs":623,"../key":636,"../private-key":637,"../utils":640,"./pem":629,"./pkcs8":631,"asn1":407,"assert-plus":641,"buffer":58,"dup":337}],631:[function(require,module,exports){
-arguments[4][338][0].apply(exports,arguments)
-},{"../algs":623,"../key":636,"../private-key":637,"../utils":640,"./pem":629,"asn1":407,"assert-plus":641,"buffer":58,"dup":338}],632:[function(require,module,exports){
-arguments[4][339][0].apply(exports,arguments)
-},{"../algs":623,"../key":636,"../private-key":637,"../ssh-buffer":639,"../utils":640,"assert-plus":641,"buffer":58,"dup":339}],633:[function(require,module,exports){
-arguments[4][340][0].apply(exports,arguments)
-},{"../algs":623,"../key":636,"../private-key":637,"../ssh-buffer":639,"../utils":640,"./pem":629,"./rfc4253":632,"asn1":407,"assert-plus":641,"buffer":58,"crypto":72,"dup":340}],634:[function(require,module,exports){
-arguments[4][341][0].apply(exports,arguments)
-},{"../key":636,"../private-key":637,"../utils":640,"./rfc4253":632,"./ssh-private":633,"assert-plus":641,"buffer":58,"dup":341}],635:[function(require,module,exports){
-arguments[4][342][0].apply(exports,arguments)
-},{"./errors":626,"./fingerprint":627,"./key":636,"./private-key":637,"./signature":638,"dup":342}],636:[function(require,module,exports){
-arguments[4][343][0].apply(exports,arguments)
-},{"./algs":623,"./dhe":624,"./ed-compat":625,"./errors":626,"./fingerprint":627,"./formats/auto":628,"./formats/pem":629,"./formats/pkcs1":630,"./formats/pkcs8":631,"./formats/rfc4253":632,"./formats/ssh":634,"./formats/ssh-private":633,"./private-key":637,"./signature":638,"./utils":640,"assert-plus":641,"buffer":58,"crypto":72,"dup":343}],637:[function(require,module,exports){
+}).call(this,require("buffer").Buffer)
+},{"./algs":614,"./dhe":615,"./ed-compat":616,"./errors":617,"./fingerprint":618,"./formats/auto":619,"./formats/pem":620,"./formats/pkcs1":621,"./formats/pkcs8":622,"./formats/rfc4253":623,"./formats/ssh":625,"./formats/ssh-private":624,"./private-key":628,"./signature":629,"./utils":631,"assert-plus":632,"buffer":58,"crypto":72}],628:[function(require,module,exports){
 arguments[4][344][0].apply(exports,arguments)
-},{"./algs":623,"./ed-compat":625,"./errors":626,"./fingerprint":627,"./formats/auto":628,"./formats/pem":629,"./formats/pkcs1":630,"./formats/pkcs8":631,"./formats/rfc4253":632,"./formats/ssh-private":633,"./key":636,"./signature":638,"./utils":640,"assert-plus":641,"buffer":58,"crypto":72,"dup":344,"jodid25519":468,"util":396}],638:[function(require,module,exports){
+},{"./algs":614,"./ed-compat":616,"./errors":617,"./fingerprint":618,"./formats/auto":619,"./formats/pem":620,"./formats/pkcs1":621,"./formats/pkcs8":622,"./formats/rfc4253":623,"./formats/ssh-private":624,"./key":627,"./signature":629,"./utils":631,"assert-plus":632,"buffer":58,"crypto":72,"dup":344,"jodid25519":470,"util":396}],629:[function(require,module,exports){
 arguments[4][345][0].apply(exports,arguments)
-},{"./algs":623,"./errors":626,"./ssh-buffer":639,"./utils":640,"asn1":407,"assert-plus":641,"buffer":58,"crypto":72,"dup":345}],639:[function(require,module,exports){
+},{"./algs":614,"./errors":617,"./ssh-buffer":630,"./utils":631,"asn1":409,"assert-plus":632,"buffer":58,"crypto":72,"dup":345}],630:[function(require,module,exports){
 arguments[4][346][0].apply(exports,arguments)
-},{"assert-plus":641,"buffer":58,"dup":346}],640:[function(require,module,exports){
+},{"assert-plus":632,"buffer":58,"dup":346}],631:[function(require,module,exports){
 arguments[4][347][0].apply(exports,arguments)
-},{"./private-key":637,"assert-plus":641,"buffer":58,"dup":347,"jsbn":474}],641:[function(require,module,exports){
+},{"./private-key":628,"assert-plus":632,"buffer":58,"dup":347,"jsbn":476}],632:[function(require,module,exports){
 (function (Buffer,process){
 // Copyright (c) 2012, Mark Cavage. All rights reserved.
 // Copyright 2015 Joyent, Inc.
@@ -111366,25 +111295,203 @@ function _setExports(ndebug) {
 module.exports = _setExports(process.env.NODE_NDEBUG);
 
 }).call(this,{"isBuffer":require("../../../../client/node_modules/is-buffer/index.js")},require('_process'))
-},{"../../../../client/node_modules/is-buffer/index.js":155,"_process":279,"assert":22,"stream":349,"util":396}],642:[function(require,module,exports){
+},{"../../../../client/node_modules/is-buffer/index.js":155,"_process":279,"assert":22,"stream":349,"util":396}],633:[function(require,module,exports){
 arguments[4][355][0].apply(exports,arguments)
-},{"dup":355,"events":111}],643:[function(require,module,exports){
+},{"dup":355,"events":111}],634:[function(require,module,exports){
 arguments[4][356][0].apply(exports,arguments)
-},{"buffer":58,"dup":356}],644:[function(require,module,exports){
+},{"buffer":58,"dup":356}],635:[function(require,module,exports){
 arguments[4][357][0].apply(exports,arguments)
-},{"buffer":58,"dup":357,"stream":349,"string_decoder":356,"util":396}],645:[function(require,module,exports){
+},{"buffer":58,"dup":357,"stream":349,"string_decoder":356,"util":396}],636:[function(require,module,exports){
+(function (process){
+var License = require('./lib/license');
+
+// TODO: remove top level exports in 2.x
+module.exports = License;
+module.exports.License = License;
+
+// If run directly, parse each argument as a license and dump its contents
+if (module === require.main) {
+  process.argv.slice(2).forEach(function(k) {
+    console.log('%j', new License(k));
+  });
+}
+
+}).call(this,require('_process'))
+},{"./lib/license":637,"_process":279}],637:[function(require,module,exports){
+(function (process){
+var fmt = require('util').format;
+var jwt = require('jwt-simple');
+
+module.exports = License;
+
+License.defaultSecret = 'strong-license';
+License.defaultAlgorithm = 'HS256';
+
+/**
+ * License extends the JWT (JSON Web Token) format by adding additional fields,
+ * defining a wildcard semantic for some fields, defining semantics for
+ * validation against a query.
+ * @class
+ * @param {(string|Object)} input Encoded license string or license description object
+ * @param {string} [secret] Secret to use for encoding/decoding the license
+ * @param {string} [algorithm] Algorithm to encode/decode with
+ */
+function License(input, secret, algorithm) {
+  if (!(this instanceof License))
+    return new License(key);
+
+  secret = secret || License.defaultSecret;
+  algorithm = algorithm || License.defaultAlgorithm;
+
+  if (typeof input === 'string' || input instanceof String) {
+    this.key = input;
+    this.details = normalized(safeDecode(input, secret));
+  } else {
+    input = input || {};
+    this.details = normalized(input);
+    this.key = jwt.encode(this.details, secret, algorithm);
+  }
+}
+
+License.prototype.export = function LicenseExport(secret, algorithm) {
+  secret = secret || License.defaultSecret;
+  algorithm = algorithm || License.defaultAlgorithm;
+  return jwt.encode(this.details, secret, algorithm);
+};
+
+/**
+ * @returns {Object} decoded object to stringify when serializing to JSON
+ */
+License.prototype.toJSON = function LicenseToJSON() {
+  return this.details;
+};
+
+/**
+ * @returns {string} decoded single-line string representation of a License
+ */
+License.prototype.toString = function LicenseToString() {
+  var lic = this.details;
+  return fmt('License(email: %s, prod: %s, feat: %s, start: %s, end: %s)',
+             lic.email, lic.product, lic.features.join(','),
+             lic.activationDate, lic.expirationDate);
+};
+
+/**
+ * Licenses define a combination of product and features and the period of
+ * time that the product and features are licensed for.
+ * Parameters that are not given (or are otherwise falsey) do not have
+ * requirements, so they always pass. If no arguments are given, then all
+ * of the requirements are met and the scenario is considered "covered".
+ * @param {string} [product] Product string to query license for
+ * @param {string} [features] Feature string to query license for
+ * @param {Date} [when] Point in time to test license against
+ * @returns {Boolean} Whether the license covers the specified product,
+ *                    feature, and time.
+ */
+License.prototype.covers = function LicenseCovers(product, feature, when) {
+  return (this.coversProduct(product)
+          && this.coversFeature(feature)
+          && this.coversDate(when));
+};
+
+/**
+ * @param {string} [query] product string to test for
+ * @returns {Boolean} true if query is falsey, identical to the product string
+ *                    in the license, or if the product in the license is '*'.
+ */
+License.prototype.coversProduct = function LicenseCoversProduct(query) {
+  return match(this.details.product, query);
+};
+
+/**
+ * @param {string} [query] feature string to test for
+ * @returns {Boolean} true if query is falsey, identical any string in the
+ *                    license's feature list, or if the license's feature list
+ *                    contains a '*'.
+ */
+License.prototype.coversFeature = function LicenseCoversFeature(query) {
+  return !query || this.details.features.some(function(enabled) {
+    return match(enabled, query);
+  });
+};
+
+/**
+ * @param {Date} [when] point in time to test activation/expiration against
+ * @returns {Boolean} true if when is falsey, or if it is between the
+ *                    activationDate and expirationDate in the license.
+ */
+License.prototype.coversDate = function LicenseCoversDate(when) {
+  var lic = this.details;
+  return !when || (lic.activationDate < when && lic.expirationDate > when);
+};
+
+// 'foo' matches 'foo'
+// * matches anything
+// falsey query is matched by anything
+function match(pattern, query) {
+  var result = !query || pattern === '*' || pattern === query;
+  return result;
+}
+
+// Normalize input fields, defaulting to "invalid" or "expired" state where
+// details are missing.
+function normalized(input) {
+  var l = JSON.parse(JSON.stringify(input));
+  l.userId = l.userId || null;
+  l.email = l.email || null;
+  l.product = l.product || null;
+  if (l.product !== null) {
+    l.product = String(l.product);
+  }
+  l.features = l.features || [];
+  if (typeof l.features === 'string') {
+    // split on , and :
+    l.features = l.features.split(/(?:,|:)/);
+  } else if (!Array.isArray(l.features)) {
+    l.features = [];
+  }
+  if (l.feature) {
+    l.features.push(l.feature)
+  }
+  l.features = l.features.map(function(f) {
+    return f.trim();
+  }).filter(function(f) {
+    return !!f;
+  });
+  l.activationDate = new Date(l.activationDate || 0);
+  l.expirationDate = new Date(l.expirationDate || 0);
+  return l;
+}
+
+function safeDecode(input, secret, algorithm) {
+  try {
+    return normalized(jwt.decode(input, secret, algorithm));
+  } catch (e) {
+    return normalized({});
+  }
+}
+
+// If run directly, parse each argument as a license and dump its contents
+if (module === require.main) {
+  process.argv.slice(2).forEach(function(k) {
+    console.log('%j', new License(k));
+  });
+}
+
+}).call(this,require('_process'))
+},{"_process":279,"jwt-simple":481,"util":396}],638:[function(require,module,exports){
 arguments[4][358][0].apply(exports,arguments)
-},{"./lib/remote-objects":650,"./lib/shared-class":652,"dup":358}],646:[function(require,module,exports){
+},{"./lib/remote-objects":643,"./lib/shared-class":645,"dup":358}],639:[function(require,module,exports){
 arguments[4][359][0].apply(exports,arguments)
-},{"assert":22,"debug":417,"dup":359}],647:[function(require,module,exports){
+},{"assert":22,"debug":419,"dup":359}],640:[function(require,module,exports){
 arguments[4][360][0].apply(exports,arguments)
-},{"debug":417,"dup":360}],648:[function(require,module,exports){
+},{"debug":419,"dup":360}],641:[function(require,module,exports){
 arguments[4][361][0].apply(exports,arguments)
-},{"./dynamic":646,"_process":279,"assert":22,"debug":417,"dup":361,"events":111,"js2xmlparser":29,"mux-demux":592,"sse":620,"util":396}],649:[function(require,module,exports){
+},{"./dynamic":639,"_process":279,"assert":22,"debug":419,"dup":361,"events":111,"js2xmlparser":29,"mux-demux":575,"sse":611,"util":396}],642:[function(require,module,exports){
 arguments[4][362][0].apply(exports,arguments)
-},{"./dynamic":646,"assert":22,"debug":417,"dup":362,"events":111,"mux-demux":592,"path":274,"qs":654,"request":608,"stream":349,"url":392,"util":396}],650:[function(require,module,exports){
+},{"./dynamic":639,"assert":22,"debug":419,"dup":362,"events":111,"mux-demux":575,"path":274,"qs":647,"request":599,"stream":349,"url":392,"util":396}],643:[function(require,module,exports){
 arguments[4][363][0].apply(exports,arguments)
-},{"./dynamic":646,"./exports-helper":647,"./rest-adapter":651,"./shared-class":652,"_process":279,"assert":22,"debug":417,"dup":363,"eventemitter2":427,"url":392,"util":396}],651:[function(require,module,exports){
+},{"./dynamic":639,"./exports-helper":640,"./rest-adapter":644,"./shared-class":645,"_process":279,"assert":22,"debug":419,"dup":363,"eventemitter2":429,"url":392,"util":396}],644:[function(require,module,exports){
 (function (process){
 /*!
  * Expose `RestAdapter`.
@@ -112035,45 +112142,342 @@ function joinPaths(left, right) {
 }
 
 }).call(this,require('_process'))
-},{"./http-context":648,"./http-invocation":649,"_process":279,"assert":22,"async":409,"body-parser":29,"cors":29,"debug":417,"events":111,"express":29,"util":396}],652:[function(require,module,exports){
+},{"./http-context":641,"./http-invocation":642,"_process":279,"assert":22,"async":411,"body-parser":29,"cors":29,"debug":419,"events":111,"express":29,"util":396}],645:[function(require,module,exports){
 arguments[4][365][0].apply(exports,arguments)
-},{"./shared-method":653,"assert":22,"debug":417,"dup":365,"inflection":459,"util":396}],653:[function(require,module,exports){
+},{"./shared-method":646,"assert":22,"debug":419,"dup":365,"inflection":461,"util":396}],646:[function(require,module,exports){
 arguments[4][366][0].apply(exports,arguments)
-},{"assert":22,"buffer":58,"debug":417,"dup":366,"traverse":667,"util":396}],654:[function(require,module,exports){
+},{"assert":22,"buffer":58,"debug":419,"dup":366,"traverse":666,"util":396}],647:[function(require,module,exports){
 arguments[4][210][0].apply(exports,arguments)
-},{"./lib/":655,"dup":210}],655:[function(require,module,exports){
+},{"./lib/":648,"dup":210}],648:[function(require,module,exports){
 arguments[4][211][0].apply(exports,arguments)
-},{"./parse":656,"./stringify":657,"dup":211}],656:[function(require,module,exports){
+},{"./parse":649,"./stringify":650,"dup":211}],649:[function(require,module,exports){
 arguments[4][369][0].apply(exports,arguments)
-},{"./utils":658,"dup":369}],657:[function(require,module,exports){
+},{"./utils":651,"dup":369}],650:[function(require,module,exports){
 arguments[4][370][0].apply(exports,arguments)
-},{"./utils":658,"dup":370}],658:[function(require,module,exports){
+},{"./utils":651,"dup":370}],651:[function(require,module,exports){
 arguments[4][371][0].apply(exports,arguments)
-},{"dup":371}],659:[function(require,module,exports){
+},{"dup":371}],652:[function(require,module,exports){
+var fromEnv = require('./lib/env');
+var fromFile = require('./lib/file');
+var LicenseList = require('./lib/license-list');
+var handlers = require('./lib/handlers');
+var home = require('user-home');
+var path = require('path');
+var appRoot = require('./lib/approot');
+var debug = require('debug')('strongloop-license');
+
+var licEnvVar = 'STRONGLOOP_LICENSE';
+var licFile = path.resolve(home || '',
+                           path.join('.strongloop', 'licenses.json'));
+
+var mainModule = appRoot(require.main);
+var appLicFile = path.join(mainModule.dir, 'licenses.json');
+debug('Application license file: %s', appLicFile);
+
+module.exports = exports = validate;
+exports.CONSOLE = handlers.CONSOLE;
+exports.EXIT = handlers.EXIT;
+exports.NOOP = handlers.NOOP;
+
+var loaders = [
+  function pkgLicenses() {
+    // Read licenses from STRONGLOOP_LICENSE property of package.json
+    var config = mainModule.package.config || {};
+    var licStr = (config.strongloop && config.strongloop.license) ||
+      config.strongLoopLicense ||
+      config.StrongLoopLicense || config.STRONGLOOP_LICENSE || '';
+    var parts = licStr.split(':');
+    var lics = parts.filter(Boolean);
+    debug('loaded %d licenses from package.json %s', lics.length, licStr);
+    return lics;
+  },
+  function appLicenses() {
+    return fromFile(appLicFile);
+  },
+  function envLicenses() {
+    return fromEnv(licEnvVar);
+  },
+  function fileLicenses() {
+    return fromFile(licFile);
+  },
+];
+
+function validate(opts, callback) {
+  opts = defaults(opts);
+  var result = false;
+  var licenses = new LicenseList(loaders);
+  result = licenses.first(opts.product, opts.feature, opts.now);
+  if (result) {
+    result.details.key = result.key;
+    result = result.details;
+  }
+  setImmediate(makeHandler(callback), null, opts.label, result);
+  return result;
+}
+
+function defaults(opts) {
+  if (typeof opts === 'string') {
+    // match "product[:feature[=label]]"
+    var parts = /^([^:=]+)(?::([^:=]+))?(?:=(.+))?$/.exec(opts);
+    opts = {
+      product: parts && parts[1],
+      feature: parts && parts[2],
+      label: parts && parts[3],
+    };
+  }
+  var defaultLabel = opts.feature ? [opts.product, opts.feature].join(':')
+                                  : opts.product;
+  return {
+    product: opts.product,
+    feature: opts.feature,
+    label: opts.label || defaultLabel,
+    now: opts.now || new Date(),
+    interval: opts.interval,
+  };
+}
+
+function makeHandler(fnOrName) {
+  if (typeof fnOrName === 'string') {
+    fnOrName = handlers[fnOrName.toUpperCase()];
+  }
+  if (typeof fnOrName !== 'function') {
+    fnOrName = handlers.CONSOLE;
+  }
+  return fnOrName;
+}
+
+},{"./lib/approot":653,"./lib/env":654,"./lib/file":655,"./lib/handlers":656,"./lib/license-list":657,"debug":419,"path":274,"user-home":678}],653:[function(require,module,exports){
+var fs = require('fs');
+var path = require('path');
+
+function find(pmodule, dir) {
+  if (!dir) {
+    dir = path.dirname(pmodule.filename);
+  }
+
+  var pkgFile = path.join(dir, 'package.json');
+
+  try {
+    var stats = fs.statSync(pkgFile);
+
+    if (stats.isFile()) {
+      return pkgFile;
+    }
+  } catch (err) {
+    // Ignore the err
+  }
+
+  if (dir === '/') {
+    throw new Error('Could not find package.json up from: ' + dir);
+  } else if (!dir || dir === '.') {
+    throw new Error('Cannot find package.json from unspecified directory');
+  }
+
+  return find(pmodule, path.dirname(dir));
+}
+
+function readRootPackage(pmodule) {
+  var pkg = find(pmodule);
+
+  var data = fs.readFileSync(pkg).toString();
+
+  return {
+    dir: path.dirname(pkg),
+    package: JSON.parse(data)
+  };
+}
+
+module.exports = readRootPackage;
+
+},{"fs":56,"path":274}],654:[function(require,module,exports){
+(function (process){
+var debug = require('debug')('strongloop-license:env');
+module.exports = envLicenses;
+
+// Read from named environment variable a list of ':' separated licenses:
+// "lic1:lic2:lic3"
+
+function envLicenses(envVar) {
+  var envStr = process.env[envVar] || '';
+  var parts = envStr.split(':');
+  var lics = parts.filter(blank);
+  debug('loaded %d licenses from env var %s', lics.length, envVar);
+  return lics;
+
+  function blank(str) {
+    return !!str;
+  }
+}
+
+}).call(this,require('_process'))
+},{"_process":279,"debug":419}],655:[function(require,module,exports){
+var debug = require('debug')('strongloop-license:file');
+var fs = require('fs');
+
+module.exports = fileLicenses;
+
+// path of JSON file containing:
+// [ { licenseKey: 'lic', ...}, ... ]
+
+function fileLicenses(path) {
+  var lics = safeChain(path, fs.readFileSync, JSON.parse, extractLics);
+  lics = lics || [];
+  debug('loaded %d licenses from %s', lics.length, path);
+  return lics;
+
+  function extractLics(subs) {
+    var licenses = subs.licenses || subs;
+    if (!Array.isArray(licenses)) {
+      throw new Error('Invalid licenses: ' + subs);
+    }
+    return licenses.map(function(sub) {
+      return sub.licenseKey;
+    }).filter(blank);
+  }
+
+  function blank(str) {
+    return !!str;
+  }
+}
+
+function safeChain(init, fns) {
+  fns = [].slice.call(arguments, 1);
+  return fns.reduce(attempt, init);
+
+  function attempt(prev, fn) {
+    try {
+      return fn(prev);
+    } catch (e) {
+      return null;
+    }
+  }
+}
+
+},{"debug":419,"fs":56}],656:[function(require,module,exports){
+(function (process){
+exports.CONSOLE = logIfFailure;
+exports.EXIT = exitIfFailure;
+exports.NOOP = noop;
+
+// Handlers are given:
+//  err: null or Error
+//  req: "product:feature" or "product" used in license requirement
+//  res: true if any license met the requirements
+
+function noop() {}
+
+function exitIfFailure(err, req, res) {
+  logIfFailure(err, req, res);
+  if (err || !res) {
+    console.error('##  Terminating process.');
+    // Delay actual exit in case stderr is non-blocking
+    setTimeout(exit, 50);
+    function exit() {
+      process.exit(1);
+    }
+  }
+}
+
+function logIfFailure(err, req, res) {
+  if (err || !res) {
+    console.error('## %s licensing missing or invalid. Please verify your ' +
+                  'licenses in the Licenses page by running StrongLoop Arc ' +
+                  'by typing "slc arc --licenses" . If you have questions ' +
+                  'about your license or StrongLoop licensing please ' +
+                  'contact sales@strongloop.com.', req);
+  } else {
+    console.log('## %s is licensed from %s to %s.', req,
+                res.activationDate.toISOString(),
+                res.expirationDate.toISOString());
+  }
+}
+
+}).call(this,require('_process'))
+},{"_process":279}],657:[function(require,module,exports){
+var License = require('strong-license');
+var debug = require('debug')('strongloop-license:list');
+
+module.exports = exports = LicenseList;
+
+// Simple wrapper for loading a list of licenses and performing checks on them
+
+function LicenseList(loaders) {
+  if (!(this instanceof LicenseList)) {
+    return new LicenseList(loaders);
+  }
+  this.loaders = [].concat(loaders || []);
+  this.licenses = [];
+  this.reload();
+}
+
+LicenseList.prototype.add = function add(lic) {
+  var decodedLicense = new License(lic, 'c374fa24098c7eb64a73dc05c428be40');
+  debug('loaded license %j', decodedLicense);
+  this.licenses.push(decodedLicense);
+};
+
+LicenseList.prototype.any = function any(product, feature, now) {
+  debug('validating license for %s:%s@%j', product, feature, now);
+  var result = this.licenses.some(covers);
+  debug('result: %j', result);
+  return result;
+
+  function covers(lic) {
+    debug('testing against %j', lic);
+    return lic.covers(product, feature, now);
+  }
+};
+
+LicenseList.prototype.first = function any(product, feature, now) {
+  debug('validating license for %s:%s@%j', product, feature, now);
+  var result = this.licenses.reduce(covers, false);
+  debug('result: %j', result);
+  return result;
+
+  function covers(match, lic) {
+    if (match) {
+      return match;
+    } else {
+      debug('testing against %j', lic);
+      return lic.covers(product, feature, now) && lic;
+    }
+  }
+};
+
+LicenseList.prototype.reload = function reload() {
+  var self = this;
+  debug('reloading licenses');
+  this.loaders.forEach(function(loader) {
+    loader().forEach(self.add, self);
+  });
+};
+
+},{"debug":419,"strong-license":636}],658:[function(require,module,exports){
 arguments[4][372][0].apply(exports,arguments)
-},{"_process":279,"dup":372,"stream":349}],660:[function(require,module,exports){
+},{"_process":279,"dup":372,"stream":349}],659:[function(require,module,exports){
 arguments[4][373][0].apply(exports,arguments)
-},{"../package.json":666,"./memstore":661,"./pathMatch":662,"./permuteDomain":663,"./pubsuffix":664,"./store":665,"dup":373,"net":56,"punycode":286,"url":392}],661:[function(require,module,exports){
+},{"../package.json":665,"./memstore":660,"./pathMatch":661,"./permuteDomain":662,"./pubsuffix":663,"./store":664,"dup":373,"net":56,"punycode":286,"url":392}],660:[function(require,module,exports){
 arguments[4][374][0].apply(exports,arguments)
-},{"./pathMatch":662,"./permuteDomain":663,"./store":665,"dup":374,"util":396}],662:[function(require,module,exports){
+},{"./pathMatch":661,"./permuteDomain":662,"./store":664,"dup":374,"util":396}],661:[function(require,module,exports){
 arguments[4][375][0].apply(exports,arguments)
-},{"dup":375}],663:[function(require,module,exports){
+},{"dup":375}],662:[function(require,module,exports){
 arguments[4][376][0].apply(exports,arguments)
-},{"./pubsuffix":664,"dup":376}],664:[function(require,module,exports){
+},{"./pubsuffix":663,"dup":376}],663:[function(require,module,exports){
 arguments[4][377][0].apply(exports,arguments)
-},{"dup":377,"punycode":286}],665:[function(require,module,exports){
+},{"dup":377,"punycode":286}],664:[function(require,module,exports){
 arguments[4][378][0].apply(exports,arguments)
-},{"dup":378}],666:[function(require,module,exports){
+},{"dup":378}],665:[function(require,module,exports){
 module.exports={
   "_args": [
     [
       "tough-cookie@~2.2.0",
-      "C:\\Users\\wsteiner.LOGICX\\Documents\\ipp-project\\apps\\prototyping\\Prototypes\\loopback-full-stack-tenancy\\node_modules\\request"
+      "C:\\Users\\woste\\Documents\\code\\GitHub\\loopback-full-stack-tenancy\\node_modules\\request"
     ]
   ],
   "_from": "tough-cookie@>=2.2.0 <2.3.0",
   "_id": "tough-cookie@2.2.1",
   "_inCache": true,
+  "_installable": true,
   "_location": "/tough-cookie",
   "_nodeVersion": "0.12.5",
   "_npmUser": {
@@ -112093,11 +112497,11 @@ module.exports={
   "_requiredBy": [
     "/request"
   ],
-  "_resolved": "http://logicxklubuild:4873/tough-cookie/-/tough-cookie-2.2.1.tgz",
+  "_resolved": "https://registry.npmjs.org/tough-cookie/-/tough-cookie-2.2.1.tgz",
   "_shasum": "3b0516b799e70e8164436a1446e7e5877fda118e",
   "_shrinkwrap": null,
   "_spec": "tough-cookie@~2.2.0",
-  "_where": "C:\\Users\\wsteiner.LOGICX\\Documents\\ipp-project\\apps\\prototyping\\Prototypes\\loopback-full-stack-tenancy\\node_modules\\request",
+  "_where": "C:\\Users\\woste\\Documents\\code\\GitHub\\loopback-full-stack-tenancy\\node_modules\\request",
   "author": {
     "email": "jstashewsky@salesforce.com",
     "name": "Jeremy Stashewsky"
@@ -112134,7 +112538,7 @@ module.exports={
   "directories": {},
   "dist": {
     "shasum": "3b0516b799e70e8164436a1446e7e5877fda118e",
-    "tarball": "http://logicxklubuild:4873/tough-cookie/-/tough-cookie-2.2.1.tgz"
+    "tarball": "http://registry.npmjs.org/tough-cookie/-/tough-cookie-2.2.1.tgz"
   },
   "engines": {
     "node": ">=0.10.0"
@@ -112144,7 +112548,6 @@ module.exports={
   ],
   "gitHead": "f1055655ea56c85bd384aaf7d5b740b916700b6f",
   "homepage": "https://github.com/SalesforceEng/tough-cookie",
-  "installable": true,
   "keywords": [
     "HTTP",
     "RFC2965",
@@ -112169,6 +112572,7 @@ module.exports={
   ],
   "name": "tough-cookie",
   "optionalDependencies": {},
+  "readme": "ERROR: No README data found!",
   "repository": {
     "type": "git",
     "url": "git://github.com/SalesforceEng/tough-cookie.git"
@@ -112180,35 +112584,54 @@ module.exports={
   "version": "2.2.1"
 }
 
-},{}],667:[function(require,module,exports){
+},{}],666:[function(require,module,exports){
 arguments[4][380][0].apply(exports,arguments)
-},{"dup":380}],668:[function(require,module,exports){
+},{"dup":380}],667:[function(require,module,exports){
 arguments[4][381][0].apply(exports,arguments)
-},{"_process":279,"assert":22,"buffer":58,"dup":381,"events":111,"http":350,"https":150,"net":56,"tls":56,"util":396}],669:[function(require,module,exports){
+},{"_process":279,"assert":22,"buffer":58,"dup":381,"events":111,"http":350,"https":150,"net":56,"tls":56,"util":396}],668:[function(require,module,exports){
 arguments[4][382][0].apply(exports,arguments)
-},{"buffer":29,"crypto":29,"dup":382}],670:[function(require,module,exports){
+},{"buffer":29,"crypto":29,"dup":382}],669:[function(require,module,exports){
 arguments[4][383][0].apply(exports,arguments)
-},{"crypto":72,"dup":383}],671:[function(require,module,exports){
+},{"crypto":72,"dup":383}],670:[function(require,module,exports){
 arguments[4][384][0].apply(exports,arguments)
-},{"./decapitalize":674,"./trim":678,"dup":384}],672:[function(require,module,exports){
+},{"./decapitalize":673,"./trim":677,"dup":384}],671:[function(require,module,exports){
 arguments[4][385][0].apply(exports,arguments)
-},{"./helper/makeString":677,"dup":385}],673:[function(require,module,exports){
+},{"./helper/makeString":676,"dup":385}],672:[function(require,module,exports){
 arguments[4][386][0].apply(exports,arguments)
-},{"./camelize":671,"./capitalize":672,"./helper/makeString":677,"dup":386}],674:[function(require,module,exports){
+},{"./camelize":670,"./capitalize":671,"./helper/makeString":676,"dup":386}],673:[function(require,module,exports){
 arguments[4][387][0].apply(exports,arguments)
-},{"./helper/makeString":677,"dup":387}],675:[function(require,module,exports){
+},{"./helper/makeString":676,"dup":387}],674:[function(require,module,exports){
 arguments[4][388][0].apply(exports,arguments)
-},{"./escapeRegExp":676,"dup":388}],676:[function(require,module,exports){
+},{"./escapeRegExp":675,"dup":388}],675:[function(require,module,exports){
 arguments[4][389][0].apply(exports,arguments)
-},{"./makeString":677,"dup":389}],677:[function(require,module,exports){
+},{"./makeString":676,"dup":389}],676:[function(require,module,exports){
 arguments[4][390][0].apply(exports,arguments)
-},{"dup":390}],678:[function(require,module,exports){
+},{"dup":390}],677:[function(require,module,exports){
 arguments[4][391][0].apply(exports,arguments)
-},{"./helper/defaultToWhiteSpace":675,"./helper/makeString":677,"dup":391}],679:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":674,"./helper/makeString":676,"dup":391}],678:[function(require,module,exports){
+(function (process){
+'use strict';
+var env = process.env;
+var home = env.HOME;
+var user = env.LOGNAME || env.USER || env.LNAME || env.USERNAME;
+
+if (process.platform === 'win32') {
+	module.exports = env.USERPROFILE || env.HOMEDRIVE + env.HOMEPATH || home || null;
+} else if (process.platform === 'darwin') {
+	module.exports = home || (user ? '/Users/' + user : null) || null;
+} else if (process.platform === 'linux') {
+	module.exports = home ||
+		(user ? (process.getuid() === 0 ? '/root' : '/home/' + user) : null) || null;
+} else {
+	module.exports = home || null;
+}
+
+}).call(this,require('_process'))
+},{"_process":279}],679:[function(require,module,exports){
 arguments[4][394][0].apply(exports,arguments)
 },{"dup":394}],680:[function(require,module,exports){
 arguments[4][397][0].apply(exports,arguments)
-},{"assert":22,"dup":397,"extsprintf":429,"util":396}],681:[function(require,module,exports){
+},{"assert":22,"dup":397,"extsprintf":431,"util":396}],681:[function(require,module,exports){
 arguments[4][399][0].apply(exports,arguments)
 },{"dup":399}],682:[function(require,module,exports){
 module.exports = {
@@ -112235,19 +112658,6 @@ var app = module.exports = loopback();
 // Bootstrap the application, configure models, datasources and middleware.
 // Sub-apps like REST API are mounted via boot scripts.
 boot(app, __dirname);
-
-var remoteDs = app.dataSources.remoteDS;
-var remotes = remoteDs.connector.remotes;
-
-remotes.before('**', function(ctx, next)
-{
-    ctx.req.headers = 
-	{
-		datasource: window.datasource || 'nullsrc'
-	};
-
-    next();
-});
 
 }).call(this,"/")
 },{"loopback":232,"loopback-boot":174}],"loopback-boot#instructions":[function(require,module,exports){
@@ -112591,14 +113001,14 @@ module.exports={
   }
 }
 },{}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\access-token.js":[function(require,module,exports){
-arguments[4][553][0].apply(exports,arguments)
-},{"../../lib/loopback":241,"_process":279,"assert":22,"buffer":58,"dup":553,"uid2":383}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\acl.js":[function(require,module,exports){
-arguments[4][555][0].apply(exports,arguments)
-},{"../../lib/access-context":233,"../../lib/loopback":241,"_process":279,"assert":22,"async":23,"debug":73,"dup":555}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\role-mapping.js":[function(require,module,exports){
-arguments[4][565][0].apply(exports,arguments)
-},{"../../lib/loopback":241,"_process":279,"dup":565}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\role.js":[function(require,module,exports){
-arguments[4][567][0].apply(exports,arguments)
-},{"../../lib/access-context":233,"../../lib/loopback":241,"_process":279,"assert":22,"async":23,"debug":73,"dup":567}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\user.js":[function(require,module,exports){
+arguments[4][530][0].apply(exports,arguments)
+},{"../../lib/loopback":241,"_process":279,"assert":22,"buffer":58,"dup":530,"uid2":383}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\acl.js":[function(require,module,exports){
+arguments[4][532][0].apply(exports,arguments)
+},{"../../lib/access-context":233,"../../lib/loopback":241,"_process":279,"assert":22,"async":23,"debug":73,"dup":532}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\role-mapping.js":[function(require,module,exports){
+arguments[4][542][0].apply(exports,arguments)
+},{"../../lib/loopback":241,"_process":279,"dup":542}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\role.js":[function(require,module,exports){
+arguments[4][544][0].apply(exports,arguments)
+},{"../../lib/access-context":233,"../../lib/loopback":241,"_process":279,"assert":22,"async":23,"debug":73,"dup":544}],"loopback-boot#models#client\\node_modules\\loopback\\common\\models\\user.js":[function(require,module,exports){
 (function (__dirname){
 /*!
  * Module Dependencies.

@@ -13,6 +13,9 @@ module.exports = function()
 		
 		if (req.accessToken && req.accessToken.userId)
 			ctx.set('user', req.accessToken.userId);
+            
+        if (req.query && req.query.filter && req.query.filter.include)
+			ctx.set('include', req.query.filter.include);
 	}
 
     next();

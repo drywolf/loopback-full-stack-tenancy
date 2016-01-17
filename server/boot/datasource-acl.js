@@ -54,6 +54,6 @@ module.exports = function(app) {
         check_acl(context.accessToken.userId, context.remotingContext.req.headers.datasource, cb);
     }
     else
-        cb(new Error("Tenant-ACL: Authorization denied, no valid authentication provided"));
+        cb(new Error("Tenant-ACL: Authorization denied, no valid authentication provided", context.accessToken.id));
   });
 };
