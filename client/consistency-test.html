@@ -44,7 +44,6 @@
 		'sql_familyB',
 		'sql_familyC'
 	];
-	var i = 0;
 
 	var app = require('loopback-app');
 	
@@ -75,7 +74,6 @@
 	User.login(credentials, function (err, token)
 	{
 		credentials.token = token;
-		console.log("logged in: ", credentials);
 		
 		remotes.auth = 
 		{
@@ -85,17 +83,20 @@
 		
         document.body.innerHTML += 'Logged in: ' + JSON.stringify(remotes.auth.bearer) + '<br>';
         
-        test_runner = setInterval(query, 1);
+        //test_runner = setInterval(query, 1);
+        setTimeout(query, 1);
     });
 	
+    var run_idx = 0;
     var run_limit = 1000;
-    var test_run = 0;
+    var test_run = 1;
     var tests_ok = 0;
     var tests_failed = 0;
+    var tests_rejected = 0;
     
 	var query = function()
 	{
-        var curr_family = app_req_source;
+        var curr_src = app_req_source;                
         var curr_run = test_run++;
         
 		Person.find({ include: 'pets' }, function(err, items) {
@@ -104,14 +105,16 @@
             {
                 document.body.innerHTML += "<b>Query-Error</b>: " + err + '<br>';
                 
-                i = ++i % sources.length;
-                app_req_source = sources[i];
-                console.log("new source", app_req_source);
+                run_idx = ++run_idx % sources.length;
+                app_req_source = sources[run_idx];
+                
+                window.scrollTo(0,document.body.scrollHeight);
+                setTimeout(query, 1);
+                tests_rejected += 3;
                 return;
             }
-				
-		  console.log("person-items:", items && items.length);
-          var chk = check_data[curr_family];
+            
+          var chk = check_data[curr_src];
           
           var exec_check =function(family, check_name, check_value, ref_value)
           {
@@ -129,24 +132,27 @@
           
           if (chk && items && items.length > 0)
           {
-              exec_check(curr_family, 'person-name', chk.person.name, items[0].name);
-              exec_check(curr_family, 'pet-name', chk.pet.name, items[0].pets()[0].name);
-              exec_check(curr_family, 'pet-species', chk.pet.species, items[0].pets()[0].species);
+              exec_check(curr_src, 'person-name', chk.person.name, items[0].name);
+              exec_check(curr_src, 'pet-name', chk.pet.name, items[0].pets()[0].name);
+              exec_check(curr_src, 'pet-species', chk.pet.species, items[0].pets()[0].species);
           }
-            
-            i = ++i % sources.length;
-            app_req_source = sources[i];
-            console.log("new source", app_req_source);
-            
+                        
             if (curr_run >= run_limit)
             {
                 clearInterval(test_runner);
                 document.body.innerHTML += 'Finished Tests: <br>';
                 document.body.innerHTML += 'Tests-OK: ' + tests_ok + '<br>';
                 document.body.innerHTML += 'Tests-FAILED: ' + tests_failed + '<br>';
+                document.body.innerHTML += 'Tests-REJECTED: ' + tests_rejected + '<br>';
+                window.scrollTo(0,document.body.scrollHeight);
+                return;
             }
             
+            run_idx = ++run_idx % sources.length;
+            app_req_source = sources[run_idx];
+            
             window.scrollTo(0,document.body.scrollHeight);
+            setTimeout(query, 1);
 		});
 	}	
 </script>
