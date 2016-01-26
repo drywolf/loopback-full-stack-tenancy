@@ -23,11 +23,19 @@ module.exports = function(app)
         inject(ctx, next);
     };
 
-    app.remotes().before('Person.*', inject);
-    app.remotes().before('Person.prototype.*', inject_cb);
+    var shared_models = 
+    [
+        'Person',
+        'Pet'
+    ];
     
-    app.remotes().before('Pet.*', inject);
-    app.remotes().before('Pet.prototype.*', inject_cb);
+    for (var m in shared_models)
+    {
+        var model = shared_models[m];
+        
+        app.remotes().before(model + '.*', inject);
+        app.remotes().before(model + '.prototype.*', inject_cb);
+    }
 
     // unfortunately this requires us to add the options object
     // to the remote method definition
