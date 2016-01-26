@@ -2,44 +2,37 @@ var loopback = require('loopback');
 
 module.exports = function(model, debug, dynamic_ds_mixin)
 {
-    // this is a security measure to ensure that confidential data-sources will not by any means 
-    // stay attached to a model and return their data to an unauthorized request for that data-source
-	model.beforeRemote('**', function(remotingCtx, unused, next)
+	model.beforeRemote('**', function(remoteCtx, unused, next)
 	{
-		model.attachTo(model.app.dataSources.nullsrc);
-        
-        var ctx = loopback.getCurrentContext();
-        
-        if (ctx)
-            ctx.set('req-model', model.modelName);        
+        if (remoteCtx)
+        {
+            var ds_name = remoteCtx.req.headers.datasource;
+            
+            if (ds_name)
+            {
+                var include = null;
+                
+                // TODO: handle complex/hierarchical include
+                if (remoteCtx.args && remoteCtx.args.filter && remoteCtx.args.filter.include)
+                    include = remoteCtx.args.filter.include;
+                
+                // TODO generic
+                model.switchDataSource(ds_name, include);
+            }
+        }       
 
 		next();
 	});
-	
-    // override this method and return model data from the requested data-source
-	model.getDataSource = function()
-    {
-        var ctx = loopback.getCurrentContext();
 
-        if (!ctx)
-        {
-            if (debug)
-                console.log(model.modelName, "getDS: no context");
-            
-            return this.dataSource;
-        }
-        
-        var ds_name = ctx.get('datasource');
-        var user_id = ctx.get('user');
-        var include = ctx.get('include');
-        var req_model = ctx.get('req-model');
-        
+    // NOTE: this method attaches all required models to a requested datasource
+	model.switchDataSource = function(ds_name, include)
+    { 
         if (!ds_name)
         {
             if (debug)
                 console.log(model.modelName, "getDS: no datasource");
         
-            return null;
+            throw new Error("DataSource: no datasource name defined for request");
         }
                 
         var ds = model.app.dataSources[ds_name];
@@ -58,7 +51,7 @@ module.exports = function(model, debug, dynamic_ds_mixin)
 
         // NOTE: this is to work arround a bug in the MS SQL connector which does not pass the request context when querying model relations
         // NOTE: this is only working right now for the most simple 'include' case, when a single relation property is included in the query
-        if (req_model === model.modelName && typeof include === 'string')
+        if (typeof include === 'string')
         {
             // find relation that should be included
             var relation = model.relations[include];

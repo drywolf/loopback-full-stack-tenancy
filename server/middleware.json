@@ -19,8 +19,7 @@
   },
   "session": {},
   "auth": {
-    "loopback#token": {},
-    "./middleware/req-intercept": {}
+    "loopback#token": {}
   },
   "parse": {},
   "routes": {},

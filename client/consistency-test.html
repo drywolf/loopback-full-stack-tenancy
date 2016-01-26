@@ -70,6 +70,7 @@
 		password: 'test'
 	};
         
+    var delay = 1;
     var start = new Date().getTime();
 	var test_runner;
 	User.login(credentials, function (err, token)
@@ -85,16 +86,18 @@
         document.body.innerHTML += 'Logged in: ' + JSON.stringify(remotes.auth.bearer) + '<br>';
         document.body.innerHTML += 'Running tests, please wait... (~15-30 sec)';
 
-        setTimeout(query, 1);
+        setTimeout(query, delay);
     });
 	
     var run_idx = 0;
     var run_limit = 1000;
     var test_run = 1;
-    var tests_ok = 0;
-    var tests_failed = 0;
-    var tests_rejected = 0;
-    var verbose = true;
+    
+    var person_name_test = { ok: 0, failed: 0, rejected: 0 };
+    var pet_name_test = { ok: 0, failed: 0, rejected: 0 };
+    var pet_species_test = { ok: 0, failed: 0, rejected: 0 };
+        
+    var verbose = false;
     
 	var query = function()
 	{
@@ -111,32 +114,42 @@
                 app_req_source = sources[run_idx];
                 
                 window.scrollTo(0,document.body.scrollHeight);
-                setTimeout(query, 1);
-                tests_rejected += 3;
+                setTimeout(query, delay);
+                
+                person_name_test.rejected++;
+                pet_name_test.rejected++;
+                pet_species_test.rejected++;
+                
                 return;
             }
             
           var chk = check_data[curr_src];
           
-          var exec_check =function(family, check_name, check_value, ref_value)
+          var exec_check = function(family, check_name, check_value, ref_value, test_obj)
           {
               if (check_value !== ref_value)
               {
                   if (verbose) document.body.innerHTML += ("[" + curr_run + "] " + family + " &gt; " + check_name + " MISMATCH: " + check_value + " !== " + ref_value) + "<br>";
-                  ++tests_failed;
+                  test_obj.failed++;
               }
               else
               {
                   if (verbose) document.body.innerHTML += ("[" + curr_run + "] " + family + " &gt; " + check_name + " MATCH: " + check_value + " === " + ref_value) + '<br>';
-                  ++tests_ok;
+                  test_obj.ok++;
               }
           };
           
+          if (!verbose)
+          {
+            var curr_time = new Date().getTime() - start;              
+            document.body.innerHTML = '[' + test_run + '/' + run_limit + ', ' + (curr_time*0.001) + ' sec]<br/>';
+          }
+          
           if (chk && items && items.length > 0)
           {
-              exec_check(curr_src, 'person-name', chk.person.name, items[0].name);
-              exec_check(curr_src, 'pet-name', chk.pet.name, items[0].pets()[0].name);
-              exec_check(curr_src, 'pet-species', chk.pet.species, items[0].pets()[0].species);
+              exec_check(curr_src, 'person-name', chk.person.name, items[0].name, person_name_test);
+              exec_check(curr_src, 'pet-name', chk.pet.name, items[0].pets()[0].name, pet_name_test);
+              exec_check(curr_src, 'pet-species', chk.pet.species, items[0].pets()[0].species, pet_species_test);
           }
                         
             if (curr_run >= run_limit)
@@ -144,12 +157,22 @@
                 var end = new Date().getTime();
                 var time = end - start;
 
+                var print_detail_test_result = function(test_name, test_obj)
+                {
+                    document.body.innerHTML += '<u>' + test_name + ' Results:</u><br>';
+                    document.body.innerHTML += '<span style="color: green">OK: ' + test_obj.ok + '</span><br>';
+                    document.body.innerHTML += '<span style="color: red">FAILED: ' + test_obj.failed + '</span><br>';
+                    document.body.innerHTML += '<span style="color: orange">REJECTED: ' + test_obj.rejected + '</span><br>';
+                }
+
                 clearInterval(test_runner);
                 document.body.innerHTML += 'Finished Tests: <br>';
-                document.body.innerHTML += 'Tests-OK: ' + tests_ok + '<br>';
-                document.body.innerHTML += 'Tests-FAILED: ' + tests_failed + '<br>';
-                document.body.innerHTML += 'Tests-REJECTED: ' + tests_rejected + '<br>';
-                document.body.innerHTML += 'Time elapsed: ' + (time*0.001) + ' sec<br>';
+                
+                print_detail_test_result('Person-Name Test', person_name_test);
+                print_detail_test_result('Pet-Name Test', pet_name_test);
+                print_detail_test_result('Pet-Species Test', pet_species_test);
+
+                document.body.innerHTML += 'Total Time elapsed: ' + (time*0.001) + ' sec<br>';
                 window.scrollTo(0,document.body.scrollHeight);
                 return;
             }
@@ -158,7 +181,7 @@
             app_req_source = sources[run_idx];
             
             window.scrollTo(0,document.body.scrollHeight);
-            setTimeout(query, 1);
+            setTimeout(query, delay);
 		});
 	}	
 </script>
