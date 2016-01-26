@@ -14,14 +14,23 @@ module.exports = function(model, ds_name)
 		
 	ds.connector.execute('create schema ' + ds_name, [], function (err, res)
 	{
-		console.log("create schema");
+		console.log("create schema " + ds_name);
 		
-		model.app.models.Person.attachTo(ds);
-		model.app.models.Pet.attachTo(ds);
+        var shared_models = 
+        [
+            'Person',
+            'Pet'
+        ];
+        
+        for (var m in shared_models)
+        {
+            var mdl_name = shared_models[m];            
+            model.app.models[mdl_name].attachTo(ds);
+        }
 		
-		ds.autoupdate(['Person', 'Pet'], function ()
+		ds.autoupdate(shared_models, function ()
 		{
-		  console.log("Provisioned models to datasource " + ds_name);
+		  console.log("Provisioned shared models to datasource " + ds_name);
 		});
 	});
 	
